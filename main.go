@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +27,16 @@ const (
 	gitDir           = ".git"
 	hashLength       = 16
 )
+
+// debugEnabled is a package-level variable to control debug logging.
+var debugEnabled bool
+
+// debugf prints formatted debug messages to stderr if the -debug flag is enabled.
+func debugf(format string, v ...interface{}) {
+	if debugEnabled {
+		log.Printf("DEBUG: "+format, v...)
+	}
+}
 
 // stringSliceFlag is a custom flag type to handle multiple occurrences of a string flag.
 type stringSliceFlag []string
@@ -111,6 +122,9 @@ func main() {
 	flag.Parse()
 	cfg.Excludes = excludes
 
+	// Initialize the logger to not show date/time prefixes for debug output
+	log.SetFlags(0)
+
 	// 2. Determine input paths
 	cfg.InputPaths = flag.Args()
 	if len(cfg.InputPaths) == 0 {
@@ -124,6 +138,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error calculating common root: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Log the final configuration if debug is enabled
+	debugf("Configuration complete: %+v", *cfg)
 
 	// 4. Build the entity tree by walking the filesystem
 	entities, err := buildEntityTree(cfg)
@@ -220,6 +237,8 @@ func buildEntityTree(cfg *Config) ([]Entity, error) {
 
 			// Must check exclusion for both files and directories
 			if isExcluded(currentPath, cfg.CommonRoot, cfg.Excludes) {
+				// Log ignored paths
+				debugf("Excluding path during initial scan: %s", currentPath)
 				if d.IsDir() {
 					return filepath.SkipDir
 				}
@@ -332,6 +351,8 @@ func (b *Bucket) Process(cfg *Config) error {
 		}
 
 		if isExcluded(path, cfg.CommonRoot, cfg.Excludes) {
+			// Log ignored paths within a bucket
+			debugf("Excluding path within bucket '%s': %s", b.Path, path)
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
