@@ -460,7 +460,7 @@ func (b *Bucket) Print(writer io.Writer, commonRoot string) {
 		relPath = ""
 	}
 
-	fmt.Fprintf(writer, "dir %s %s %s\n", b.BucketHash, formatTimestamp(b.Timestamp), relPath)
+	fmt.Fprintf(writer, "dir   %s %s %s\n", b.BucketHash, formatTimestamp(b.Timestamp), relPath)
 }
 
 func checkBitrot(fstatePath string, currentFiles []FileState) (bool, error) {
