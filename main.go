@@ -78,12 +78,11 @@ type FileState struct {
 
 // Bucket represents a standard directory with files.
 type Bucket struct {
-	Path        string
-	BucketHash  string
-	Timestamp   time.Time
-	Children    []Entity
-	files       []FileState
-	isRootInput bool
+	Path       string
+	BucketHash string
+	Timestamp  time.Time
+	Children   []Entity
+	files      []FileState
 }
 
 // GitRepo represents a Git repository.
@@ -142,8 +141,8 @@ func main() {
 	// Log the final configuration if debug is enabled
 	debugf("Configuration complete: %+v", *cfg)
 
-	// 4. Build the entity tree by walking the filesystem
-	entities, err := buildEntityTree(cfg)
+	// 4. Discover all entities (explicit and implicit)
+	entities, err := findEntities(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error scanning directories: %v\n", err)
 		os.Exit(1)
@@ -206,85 +205,106 @@ func getCommonRoot(paths []string) (string, error) {
 	return commonRoot, nil
 }
 
-// buildEntityTree walks the input paths and constructs an in-memory tree of Entities.
-func buildEntityTree(cfg *Config) ([]Entity, error) {
-	var rootEntities []Entity
-	inputPathMap := make(map[string]bool)
-	for _, p := range cfg.InputPaths {
-		abs, _ := filepath.Abs(p)
-		inputPathMap[abs] = true
-	}
+// findEntities walks the input paths to discover all explicit and implicit entities in a single pass.
+func findEntities(cfg *Config) ([]Entity, error) {
+	var gitRepos []string
+	var explicitBuckets []string
+	dirsWithFiles := make(map[string]bool)
 
-	// This map prevents processing the same directory twice if it's nested within another input.
-	visited := make(map[string]bool)
-
+	// Step 1: Walk the entire file tree once to gather all facts.
 	for _, path := range cfg.InputPaths {
 		absPath, err := filepath.Abs(path)
 		if err != nil {
 			return nil, err
 		}
-		if visited[absPath] {
-			continue
-		}
-
 		err = filepath.WalkDir(absPath, func(currentPath string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
-			if visited[currentPath] {
-				return filepath.SkipDir
-			}
-
-			// Must check exclusion for both files and directories
 			if isExcluded(currentPath, cfg.CommonRoot, cfg.Excludes) {
-				// Log ignored paths
-				debugf("Excluding path during initial scan: %s", currentPath)
 				if d.IsDir() {
 					return filepath.SkipDir
 				}
 				return nil
 			}
 
-			if !d.IsDir() {
-				return nil // We only care about directories at this stage
-			}
-
-			// Check if the directory is an entity boundary
-			isGit := hasDirEntry(currentPath, gitDir)
-			isBucket := hasDirEntry(currentPath, fstateFile)
-			isRootInput := inputPathMap[currentPath]
-
-			// An entity is created if it's a git repo, has an .fstate file, or is a top-level input path.
-			if isGit || isBucket || isRootInput {
-				var newEntity Entity
-				if isGit {
-					newEntity = &GitRepo{Path: currentPath}
-				} else {
-					newEntity = &Bucket{Path: currentPath, isRootInput: isRootInput}
+			if d.IsDir() {
+				if hasDirEntry(currentPath, gitDir) {
+					gitRepos = append(gitRepos, currentPath)
+					return filepath.SkipDir // Git repos are terminal; don't look inside.
 				}
-
-				// Find parent and attach, or add as a new root entity
-				parent := findParentEntity(rootEntities, currentPath)
-				if parent != nil {
-					parent.AddChild(newEntity)
-				} else {
-					rootEntities = append(rootEntities, newEntity)
+				if hasDirEntry(currentPath, fstateFile) {
+					explicitBuckets = append(explicitBuckets, currentPath)
 				}
-				visited[currentPath] = true
-
-				// Only skip if it's a "hard" boundary (a nested Git repo or .fstate bucket).
-				// If it's just a top-level directory given as input, we need to walk inside it
-				// to find any nested entities.
-				if isGit || isBucket {
-					return filepath.SkipDir
-				}
+			} else {
+				// It's a file, so its parent is a candidate for an implicit bucket.
+				dirsWithFiles[filepath.Dir(currentPath)] = true
 			}
 			return nil
 		})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("error walking %s: %w", path, err)
 		}
 	}
+
+	// Step 2: Build the initial entity list and a map of "claimed" space.
+	var finalEntities []Entity
+	claimedPaths := make(map[string]bool)
+
+	for _, path := range gitRepos {
+		finalEntities = append(finalEntities, &GitRepo{Path: path})
+		claimedPaths[path] = true
+	}
+	for _, path := range explicitBuckets {
+		finalEntities = append(finalEntities, &Bucket{Path: path})
+		claimedPaths[path] = true
+	}
+
+	// Step 3: Find the highest-level implicit buckets.
+	// Sort candidate paths to process parents before children.
+	var candidatePaths []string
+	for path := range dirsWithFiles {
+		candidatePaths = append(candidatePaths, path)
+	}
+	sort.Strings(candidatePaths)
+
+	for _, path := range candidatePaths {
+		isClaimed := false
+		// Check if this path or any of its parents are already claimed.
+		tempPath := path
+		for {
+			if claimedPaths[tempPath] {
+				isClaimed = true
+				break
+			}
+			parent := filepath.Dir(tempPath)
+			if parent == tempPath {
+				break
+			}
+			tempPath = parent
+		}
+
+		if !isClaimed {
+			finalEntities = append(finalEntities, &Bucket{Path: path})
+			claimedPaths[path] = true // This new bucket now claims its space.
+		}
+	}
+
+	// Step 4: Build the parent-child relationships for the final list.
+	sort.Slice(finalEntities, func(i, j int) bool {
+		return len(finalEntities[i].GetPath()) < len(finalEntities[j].GetPath())
+	})
+
+	var rootEntities []Entity
+	for _, entity := range finalEntities {
+		parent := findParentEntity(rootEntities, entity.GetPath())
+		if parent != nil {
+			parent.AddChild(entity)
+		} else {
+			rootEntities = append(rootEntities, entity)
+		}
+	}
+
 	return rootEntities, nil
 }
 
