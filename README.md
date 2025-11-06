@@ -144,7 +144,7 @@ Generated for non-Git directories that contain files or an existing `.fstate` fi
 **Example Bucket Output:**
 
 ```
-dir 1b676f44a30e8c4f 2025-11-05T03:30:00.000Z documents/photos-2024
+dir   1b676f44a30e8c4f 2025-11-05T03:30:00.000Z documents/photos-2024
 ```
 
 ---
