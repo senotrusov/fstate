@@ -6,10 +6,10 @@ A lightweight, deterministic command-line utility for generating a human-readabl
 
 ### 🌟 Why `fstate`? (The Problem & The Solution)
 
-If you work on multiple computers (laptop, desktop, VM) and rely on manual or selective synchronization, you know the pain:
+If you work on multiple computers (laptop, desktop, VM) and rely on manual or automatic synchronization, you know the pain:
 
 1.  **Slow, Automated Syncing:** Fully automatic sync services are often resource-intensive, slow, and prone to creating conflicts or disasters, especially with large codebases or vast amounts of data.
-2.  **Lack of State Visibility:** You often don't know *which* machine has the latest version of a project or dataset without running a full, slow `diff` or a resource-heavy sync service scan. This is especially true for folders containing things like **photos, video, datasets, or experimental output** that are not tracked by Git.
+2. **Lack of State Visibility:** You often don't know *which* machine has the latest version of a project or dataset, or even whether a specific project or data directory exists on it at all. This is especially true for folders containing things like **photos, video, datasets, or experimental output** that are not tracked by Git.
 
 `fstate` solves this by giving you **state at a glance**:
 
@@ -24,7 +24,7 @@ The tool generates a single, deterministic **state summary** (`fstate` output) f
 
 *   **Deterministic Hashing:** Uses `xxh3` for high-speed, non-cryptographic, 16-character hashes for both file contents and overall directory states.
 *   **Git Repository Analysis:** Differentiates between clean, unpushed, and dirty states, providing the branch, commit hash, and upstream URL.
-*   **Directory "Buckets":** Handles unversioned data folders by creating a file manifest (`.fstate`) and calculating a hash over that manifest.
+*   **Directory "Buckets":** For non-versioned folders, `fstate` scans and creates a file manifest with each file’s path, hash, and timestamp, stored in a hidden **`.fstate`** file inside the folder. The `BUCKET_HASH` reflects this manifest’s state. You can easily compare two `.fstate` files (e.g., from desktop and laptop) with `diff` to see added, removed, or changed files.
 *   **Built-in Bitrot Detection:** Compares the current file mtime and hash against the existing `.fstate` file. If a file's mtime is the *same* but its hash is *different*, it indicates potential bitrot and writes the new state to a separate `.fstate-after-bitrot` file.
 *   **Nested Entity Exclusion:** Automatically excludes any subdirectory that is itself a Git repository or another `fstate` bucket from its parent's hash calculation, ensuring clean, modular state tracking.
 *   **Common Root Relativity:** Automatically determines the longest common ancestor path for all input arguments, making output paths universally comparable across machines.
@@ -46,6 +46,14 @@ Since `fstate` is written in Go, you can easily install it if you have the Go to
     ```
     *(The `fstate` binary will be placed in your `$GOPATH/bin` or `$GOBIN`)*
 
+### ⚙️ Building for Development
+
+To compile the executable in the current directory for local testing or development:
+
+```bash
+go build
+```
+
 ### 💡 Usage
 
 The simplest way to run `fstate` is to scan the current directory:
@@ -53,6 +61,15 @@ The simplest way to run `fstate` is to scan the current directory:
 ```bash
 fstate
 ```
+
+#### Options
+
+| Flag | Description |
+| :--- | :--- |
+| `-o <file>` | Write output to the specified file path (default: stdout). |
+| `-e <pattern>` | Exclude pattern (can be specified multiple times). |
+| `-nostate` | Prevent writing or modifying `.fstate` or `.fstate-after-bitrot` files. |
+| `-nobitrot` | Disable the bitrot detection logic. |
 
 #### Examples
 
@@ -71,12 +88,12 @@ fstate /mnt/work/code/app1 /mnt/work/code/app2 /mnt/work/archive
 # The relative paths in the output will match Machine A's output.
 ```
 
-**2. Excluding Directories and Files**
+**2. Excluding directories and files**
 
-Use the `-e` flag to exclude paths. Patterns can be anchored with a leading `/` or match any path component (like `.gitignore`).
+The `-e` flag lets you exclude specific files or directories from a scan. Exclusion patterns can either match any path component or be anchored to the **common root** by starting with `/`. The matching behavior is implemented using Go’s `filepath.Match`.
 
 ```bash
-# Exclude all 'temp' directories and files that contain 'cache'
+# Exclude all 'temp' directories and any files containing 'cache'
 fstate -e temp -e '*cache*' .
 
 # Exclude only the 'vendor' directory at the root of the scan
@@ -113,12 +130,12 @@ The final output is sorted deterministically and printed line-by-line.
 
 Generated for any directory containing a `.git` folder.
 
-| Field | Description | Clean (` ` / `=`) | Dirty (`!`) |
+| Field | Description | Clean (`<space>` / `=`) | Dirty (`!`) |
 | :--- | :--- | :--- | :--- |
 | **`git`** | Entity type indicator. | | |
-| **`<S>`** | **Status.** ` ` (Clean, Pushed), `=` (Clean, Unpushed), `!` (Dirty, Uncommitted Changes). | HEAD pushed state. | `!` if any staged, unstaged, or untracked file exists. |
-| **`<HASH>`** | **Summary Hash.** | First 16 chars of the HEAD commit SHA-1. | 16-char XXH3 hash of all changed files/content. |
-| **`<TIMESTAMP>`** | **Modification Time.** | Commit time of HEAD. | Most recent mtime of any changed file. |
+| **`<STATUS>`** | **Status.** | `<space>`(Up-to-Date with Upstream), `=` (Ahead of Upstream) | `!` (Uncommitted changes) |
+| **`<HASH>`** | **Summary Hash.** | First 16 chars of the HEAD commit SHA-1. | A 16-character XXH3 hash derived from all changed file contents and paths (staged, unstaged, untracked, and deleted). |
+| **`<TIMESTAMP>`** | **Modification Time.** | Commit time of HEAD. | The most recent modification time (`mtime`) among all changed files. |
 | **`<PATH>`** | Path relative to the **Common Root**. | | |
 | **`<BRANCH>`** | Short name of the current branch. | | |
 | **`<UPSTREAM_URL>`** | URL of the configured upstream remote. | | |
@@ -126,19 +143,19 @@ Generated for any directory containing a `.git` folder.
 **Example Git Output:**
 
 ```
-git ! 0f498c89b27a3c3d 2025-11-05T02:01:00.123Z main app1/backend https://github.com/user/app1
-dir 1b676f44a30e8c4f 2025-11-05T03:30:00.000Z app1/images
+git ! 0f498c89b27a3c3d 2025-11-05T02:01:00.123Z app1/backend <main https://github.com/user/app1>
+dir   1b676f44a30e8c4f 2025-11-05T03:30:00.000Z app1/images
 ```
 
 #### Directory Bucket Line (`dir`)
 
-Generated for non-Git directories that contain files or an existing `.fstate` file.
+A directory is considered a “Bucket” if it contains at least one non-excluded file or if it already has a `.fstate` file (even an empty one).
 
 | Field | Description |
 | :--- | :--- |
 | **`dir`** | Entity type indicator. |
-| **`<BUCKET_HASH>`** | 16-char XXH3 hash of the calculated `.fstate` file content. |
-| **`<TIMESTAMP>`** | Most recent mtime of any file within this bucket's scope. |
+| **`<BUCKET_HASH>`** | A 16-char **XXH3 hash** calculated from the *contents* of the in-memory `.fstate` file generated for the current scan. |
+| **`<TIMESTAMP>`** | Most recent modification time (`mtime`) of any file within this bucket's scope. |
 | **`<PATH>`** | Path relative to the **Common Root**. |
 
 **Example Bucket Output:**
@@ -148,7 +165,8 @@ dir   1b676f44a30e8c4f 2025-11-05T03:30:00.000Z documents/photos-2024
 ```
 
 ---
-### ⚙️ Bitrot & State File Management
+
+### 🗃️ Bitrot & State File Management
 
 By default, `fstate` writes the calculated file manifest to a file named **`.fstate`** in the bucket's root directory.
 
