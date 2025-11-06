@@ -103,13 +103,10 @@ func main() {
 	cfg := &Config{}
 	var excludes stringSliceFlag
 	flag.StringVar(&cfg.OutputFile, "o", "", "Output file path (default: stdout)")
-	flag.StringVar(&cfg.OutputFile, "output", "", "Output file path (default: stdout)")
 	flag.Var(&excludes, "e", "Exclude pattern (can be specified multiple times)")
-	flag.Var(&excludes, "exclude", "Exclude pattern (can be specified multiple times)")
-	flag.BoolVar(&cfg.NoFstateWrite, "n", false, "Prevent writing/modifying .fstate files")
-	flag.BoolVar(&cfg.NoFstateWrite, "no-fstate-write", false, "Prevent writing/modifying .fstate files")
-	flag.BoolVar(&cfg.IgnoreBitrot, "b", false, "Disable bitrot detection logic")
-	flag.BoolVar(&cfg.IgnoreBitrot, "ignore-bitrot", false, "Disable bitrot detection logic")
+	flag.BoolVar(&cfg.NoFstateWrite, "nostate", false, "Prevent writing/modifying .fstate files")
+	flag.BoolVar(&cfg.IgnoreBitrot, "nobitrot", false, "Disable bitrot detection logic")
+	flag.BoolVar(&debugEnabled, "debug", false, "Enable debug logging output to stderr") // ADDED: Debug flag
 
 	flag.Parse()
 	cfg.Excludes = excludes
