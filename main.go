@@ -623,9 +623,14 @@ func (g *GitRepo) Process(cfg *Config) error {
 			}
 
 			if info.IsDir() {
-				// If it's a directory, record its existence and status without trying to read it as a file.
-				// TODO: Maybe we should hash the whole directory contents
-				fmt.Fprintf(&dirtyContent, "%s %s TYPE:DIR\n", change.status, change.path)
+				// Hash the entire directory's contents deterministically.
+				dirHash, err := hashDirectory(fullPath)
+				if err != nil {
+					// If hashing fails, record the error for a deterministic hash.
+					fmt.Fprintf(&dirtyContent, "%s %s TYPE:DIR ERROR:%s\n", change.status, change.path, err.Error())
+				} else {
+					fmt.Fprintf(&dirtyContent, "%s %s %s\n", change.status, change.path, dirHash)
+				}
 			} else {
 				// It's a file. Now we read its content to include in the hash.
 				// This restores the essential content-hashing logic.
@@ -701,14 +706,28 @@ func gitGetStatus(repoPath string) (isDirty bool, changes []gitChange, latestMod
 		// For deleted files, we don't have an mtime.
 		// The status for a file deleted from the index is " D".
 		if !strings.Contains(status, "D") {
-			info, err := os.Stat(filepath.Join(repoPath, path))
-			// Error can be ignored; file might be gone or it could be a directory.
-			// The latestModTime is a "best effort" value for dirty repos.
-			// TODO: Maybe if that's a directory we should walk it and find the most recent mtime
-			if err == nil {
-				if info.ModTime().After(latestModTime) {
-					latestModTime = info.ModTime()
+			fullPath := filepath.Join(repoPath, path)
+			info, err := os.Stat(fullPath)
+			if err != nil {
+				// Ignore errors, file might be gone after status check.
+				continue
+			}
+
+			var currentModTime time.Time
+			if info.IsDir() {
+				// Walk the directory to find the latest mtime of any file inside.
+				currentModTime, err = getLatestModTimeInDir(fullPath)
+				if err != nil {
+					// If we can't walk the dir, fall back to the dir's own mtime.
+					currentModTime = info.ModTime()
 				}
+			} else {
+				// It's a file.
+				currentModTime = info.ModTime()
+			}
+
+			if currentModTime.After(latestModTime) {
+				latestModTime = currentModTime
 			}
 		}
 	}
@@ -776,6 +795,72 @@ func gitExec(dir string, args ...string) (string, error) {
 }
 
 // --- Utility Functions ---
+
+// hashDirectory calculates a single hash for an entire directory structure.
+// It walks the directory, hashing file contents and relative paths in a deterministic order.
+func hashDirectory(rootPath string) (string, error) {
+	fileHashes := make(map[string]string)
+	var paths []string // To sort the keys of the map
+
+	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			relPath, err := filepath.Rel(rootPath, path)
+			if err != nil {
+				return err
+			}
+
+			content, err := os.ReadFile(path)
+			if err != nil {
+				// Hash the error message to make it deterministic if a file becomes unreadable.
+				fileHashes[relPath] = fmt.Sprintf("ERROR:%s", err.Error())
+			} else {
+				fileHashes[relPath] = fmt.Sprintf("%016x", xxh3.Hash(content))
+			}
+			paths = append(paths, relPath)
+		}
+		return nil
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	// Sort paths for deterministic order
+	sort.Strings(paths)
+
+	// Create a single string buffer to hash
+	var contentToHash strings.Builder
+	for _, path := range paths {
+		fmt.Fprintf(&contentToHash, "%s %s\n", fileHashes[path], path)
+	}
+
+	finalHash := fmt.Sprintf("%016x", xxh3.HashString(contentToHash.String()))
+	return finalHash, nil
+}
+
+// getLatestModTimeInDir walks a directory and returns the most recent modification time
+// of any file or subdirectory within it.
+func getLatestModTimeInDir(rootPath string) (time.Time, error) {
+	var latestTime time.Time
+	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			// Can happen if file is deleted during the walk, just skip it.
+			return nil
+		}
+		if info.ModTime().After(latestTime) {
+			latestTime = info.ModTime()
+		}
+		return nil
+	})
+	return latestTime, err
+}
 
 // formatTimestamp converts a time.Time to the required ISO 8601 format.
 func formatTimestamp(t time.Time) string {
