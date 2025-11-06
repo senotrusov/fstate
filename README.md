@@ -119,8 +119,8 @@ Generated for any directory containing a `.git` folder.
 | **`<S>`** | **Status.** ` ` (Clean, Pushed), `=` (Clean, Unpushed), `!` (Dirty, Uncommitted Changes). | HEAD pushed state. | `!` if any staged, unstaged, or untracked file exists. |
 | **`<HASH>`** | **Summary Hash.** | First 16 chars of the HEAD commit SHA-1. | 16-char XXH3 hash of all changed files/content. |
 | **`<TIMESTAMP>`** | **Modification Time.** | Commit time of HEAD. | Most recent mtime of any changed file. |
-| **`<BRANCH>`** | Short name of the current branch. | | |
 | **`<PATH>`** | Path relative to the **Common Root**. | | |
+| **`<BRANCH>`** | Short name of the current branch. | | |
 | **`<UPSTREAM_URL>`** | URL of the configured upstream remote. | | |
 
 **Example Git Output:**

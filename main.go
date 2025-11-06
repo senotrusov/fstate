@@ -539,7 +539,7 @@ func (g *GitRepo) Process(cfg *Config) error {
 		if strings.Contains(err.Error(), "unknown revision or path not in the working tree") ||
 			strings.Contains(err.Error(), "ambiguous argument 'HEAD'") {
 			isEmptyRepo = true
-			g.Branch = "(initial)" // Use a placeholder for the branch name.
+			g.Branch = "[initial]" // Use a placeholder for the branch name.
 		} else {
 			// For other unexpected errors, we still fail.
 			return fmt.Errorf("could not get branch for %s: %w", g.Path, err)
@@ -635,7 +635,7 @@ func (g *GitRepo) Print(writer io.Writer, commonRoot string) {
 		relPath = ""
 	}
 
-	fmt.Fprintf(writer, "git %s %s %s %s %s %s\n", g.Status, g.Hash, formatTimestamp(g.Timestamp), g.Branch, relPath, g.UpstreamURL)
+	fmt.Fprintf(writer, "git %s %s %s %s <%s %s>\n", g.Status, g.Hash, formatTimestamp(g.Timestamp), relPath, g.Branch, g.UpstreamURL)
 }
 
 type gitChange struct {
