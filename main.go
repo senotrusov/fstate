@@ -531,14 +531,25 @@ func (g *GitRepo) Process(cfg *Config) error {
 		return fmt.Errorf("failed to get git status for %s: %w", g.Path, err)
 	}
 
+	var isEmptyRepo bool
 	g.Branch, err = gitExec(g.Path, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
-		return fmt.Errorf("could not get branch for %s: %w", g.Path, err)
+		// A common reason for failure is an empty repository (no commits yet).
+		// In this case, 'HEAD' does not exist. We check the error message to confirm.
+		if strings.Contains(err.Error(), "unknown revision or path not in the working tree") ||
+			strings.Contains(err.Error(), "ambiguous argument 'HEAD'") {
+			isEmptyRepo = true
+			g.Branch = "(initial)" // Use a placeholder for the branch name.
+		} else {
+			// For other unexpected errors, we still fail.
+			return fmt.Errorf("could not get branch for %s: %w", g.Path, err)
+		}
 	}
 
 	g.UpstreamURL, _ = gitGetUpstreamURL(g.Path, g.Branch) // Ignore error if no upstream
 
-	if !dirty {
+	// A repo is "clean" only if it's not dirty and not empty (has commits).
+	if !dirty && !isEmptyRepo {
 		g.Hash, err = gitExec(g.Path, "rev-parse", "HEAD")
 		if err != nil {
 			return fmt.Errorf("could not get HEAD commit hash for %s: %w", g.Path, err)
