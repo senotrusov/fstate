@@ -94,6 +94,7 @@ type GitRepo struct {
 	Branch      string
 	UpstreamURL string
 	Children    []Entity
+	Error       error // Field to store processing errors
 }
 
 // --- Entity Interface Implementations ---
@@ -151,6 +152,8 @@ func main() {
 	// 5. Process each entity in the tree
 	for _, entity := range entities {
 		if err := processEntityRecursive(entity, cfg); err != nil {
+			// This block should now only be hit by critical, non-recoverable errors
+			// since GitRepo.Process() will no longer return errors for git failures.
 			fmt.Fprintf(os.Stderr, "Error processing path %s: %v\n", entity.GetPath(), err)
 			os.Exit(1)
 		}
@@ -524,11 +527,23 @@ func checkBitrot(fstatePath string, currentFiles []FileState) (bool, error) {
 
 // --- Git Repo Processing ---
 
+// Process gathers all state for a GitRepo. If any git command fails, it sets
+// the status to 'X', stores the error, and returns nil to allow the program to
+// continue processing other entities.
 func (g *GitRepo) Process(cfg *Config) error {
+	// Centralized error handler for this function
+	handleGitError := func(err error) error {
+		g.Status = "X"
+		g.Hash = "0000000000000000"
+		g.Timestamp = time.Time{}
+		g.Error = err
+		return nil // Return nil to signal that the error has been handled locally
+	}
+
 	// IsDirty, StatusChanges, LatestModTime
 	dirty, changes, modTime, err := gitGetStatus(g.Path)
 	if err != nil {
-		return fmt.Errorf("failed to get git status for %s: %w", g.Path, err)
+		return handleGitError(fmt.Errorf("git status failed: %w", err))
 	}
 
 	var isEmptyRepo bool
@@ -539,26 +554,27 @@ func (g *GitRepo) Process(cfg *Config) error {
 		if strings.Contains(err.Error(), "unknown revision or path not in the working tree") ||
 			strings.Contains(err.Error(), "ambiguous argument 'HEAD'") {
 			isEmptyRepo = true
-			g.Branch = "[initial]" // Use a placeholder for the branch name.
+			g.Branch = "[empty]"
 		} else {
-			// For other unexpected errors, we still fail.
-			return fmt.Errorf("could not get branch for %s: %w", g.Path, err)
+			return handleGitError(fmt.Errorf("could not get branch: %w", err))
 		}
 	}
 
-	g.UpstreamURL, _ = gitGetUpstreamURL(g.Path, g.Branch) // Ignore error if no upstream
+	// This is a best-effort call; failure to get the upstream URL is not a critical error
+	// that should mark the repository as errored ('X').
+	g.UpstreamURL, _ = gitGetUpstreamURL(g.Path, g.Branch)
 
-	// A repo is "clean" only if it's not dirty and not empty (has commits).
+	// A repo is "clean" only if it's not dirty and not empty.
 	if !dirty && !isEmptyRepo {
 		g.Hash, err = gitExec(g.Path, "rev-parse", "HEAD")
 		if err != nil {
-			return fmt.Errorf("could not get HEAD commit hash for %s: %w", g.Path, err)
+			return handleGitError(fmt.Errorf("could not get HEAD commit hash: %w", err))
 		}
-		g.Hash = g.Hash[:hashLength] // Truncate
+		g.Hash = g.Hash[:hashLength]
 
 		commitTimeUnix, err := gitExec(g.Path, "log", "-1", "--format=%ct")
 		if err != nil {
-			return fmt.Errorf("could not get commit timestamp for %s: %w", g.Path, err)
+			return handleGitError(fmt.Errorf("could not get commit timestamp: %w", err))
 		}
 		var commitTimeSec int64
 		fmt.Sscanf(commitTimeUnix, "%d", &commitTimeSec)
@@ -566,7 +582,9 @@ func (g *GitRepo) Process(cfg *Config) error {
 
 		unpushed, err := gitIsUnpushed(g.Path)
 		if err != nil {
-			// This can fail if there's no upstream, which is fine. Treat as not unpushed.
+			// If checking the push status fails, we can't be sure, but it's safer
+			// to not mark the whole repo as errored. We will just proceed as if it's pushed.
+			debugf("Could not check unpushed status for %s: %v", g.Path, err)
 			unpushed = false
 		}
 		if unpushed {
@@ -635,7 +653,24 @@ func (g *GitRepo) Print(writer io.Writer, commonRoot string) {
 		relPath = ""
 	}
 
-	fmt.Fprintf(writer, "git %s %s %s %s <%s %s>\n", g.Status, g.Hash, formatTimestamp(g.Timestamp), relPath, g.Branch, g.UpstreamURL)
+	// Handle the error state print format
+	if g.Status == "X" {
+		// Sanitize the error message for single-line output
+		errorMsg := "unknown error"
+		if g.Error != nil {
+			errorMsg = strings.ReplaceAll(g.Error.Error(), "\n", " ")
+		}
+		fmt.Fprintf(writer, "git %s %s %s %s <%s>\n", g.Status, g.Hash, formatTimestamp(g.Timestamp), relPath, errorMsg)
+		return
+	}
+
+	branchInfo := g.Branch
+
+	if g.UpstreamURL != "" {
+		branchInfo = fmt.Sprintf("%s %s", g.Branch, g.UpstreamURL)
+	}
+
+	fmt.Fprintf(writer, "git %s %s %s %s <%s>\n", g.Status, g.Hash, formatTimestamp(g.Timestamp), relPath, branchInfo)
 }
 
 type gitChange struct {
@@ -697,7 +732,7 @@ func gitIsUnpushed(repoPath string) (bool, error) {
 	// Check if an upstream branch is configured
 	_, err := gitExec(repoPath, "rev-parse", "@{u}")
 	if err != nil {
-		// This command fails if no upstream is configured, which means it can't be "unpushed".
+		// Fails if no upstream is configured, which is not a critical error.
 		return false, nil
 	}
 
@@ -733,7 +768,9 @@ func gitExec(dir string, args ...string) (string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git command failed: %s\n%w\n%s", strings.Join(args, " "), err, stderr.String())
+		// Create a concise, single-line error message
+		errMsg := fmt.Sprintf("git %s -> %s: %s", strings.Join(args, " "), err, stderr.String())
+		return "", errors.New(strings.TrimSpace(errMsg))
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
