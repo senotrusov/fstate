@@ -547,18 +547,38 @@ func (g *GitRepo) Process(cfg *Config) error {
 
 		var dirtyContent strings.Builder
 		for _, change := range changes {
-			if change.status == "D" {
-				dirtyContent.WriteString("D" + change.path)
+			fullPath := filepath.Join(g.Path, change.path)
+
+			// A status containing 'D' indicates a deletion.
+			if strings.Contains(change.status, "D") {
+				// For deleted items, we only hash the fact of their deletion.
+				fmt.Fprintf(&dirtyContent, "%s %s\n", change.status, change.path)
+				continue
+			}
+
+			// For any other change, check if it's a file or a directory.
+			info, err := os.Stat(fullPath)
+			if err != nil {
+				// If path doesn't exist (e.g., deleted after status) or is inaccessible,
+				// we must still record this state for a deterministic hash.
+				fmt.Fprintf(&dirtyContent, "%s %s ERROR:%s\n", change.status, change.path, err.Error())
+				continue
+			}
+
+			if info.IsDir() {
+				// If it's a directory, record its existence and status without trying to read it as a file.
+				// TODO: Maybe we should hash the whole directory contents
+				fmt.Fprintf(&dirtyContent, "%s %s TYPE:DIR\n", change.status, change.path)
 			} else {
-				content, err := os.ReadFile(filepath.Join(g.Path, change.path))
-				// Untracked files that are gitignored might be gone by the time we read them
-				if err != nil && os.IsNotExist(err) {
+				// It's a file. Now we read its content to include in the hash.
+				// This restores the essential content-hashing logic.
+				content, err := os.ReadFile(fullPath)
+				if err != nil {
+					// Handle cases where the file is unreadable.
+					fmt.Fprintf(&dirtyContent, "%s %s ERROR:%s\n", change.status, change.path, err.Error())
 					continue
 				}
-				if err != nil {
-					return fmt.Errorf("could not read dirty file %s: %w", change.path, err)
-				}
-				dirtyContent.WriteString(change.path)
+				fmt.Fprintf(&dirtyContent, "%s %s\n", change.status, change.path)
 				dirtyContent.Write(content)
 			}
 		}
@@ -598,22 +618,19 @@ func gitGetStatus(repoPath string) (isDirty bool, changes []gitChange, latestMod
 		if len(line) < 4 {
 			continue
 		}
-		status := strings.TrimSpace(line[:2])
+		// Keep the original 2-character status for a more accurate hash.
+		status := line[:2]
 		path := line[3:]
 
-		var changeType string
-		if strings.HasPrefix(status, "D") {
-			changeType = "D"
-		} else {
-			changeType = "M" // Treat added, modified, untracked etc the same for hashing purposes
-		}
-
-		changes = append(changes, gitChange{status: changeType, path: path})
+		changes = append(changes, gitChange{status: status, path: path})
 
 		// For deleted files, we don't have an mtime.
-		// For others, find the most recent mtime.
-		if changeType != "D" {
+		// The status for a file deleted from the index is " D".
+		if !strings.Contains(status, "D") {
 			info, err := os.Stat(filepath.Join(repoPath, path))
+			// Error can be ignored; file might be gone or it could be a directory.
+			// The latestModTime is a "best effort" value for dirty repos.
+			// TODO: Maybe if that's a directory we should walk it and find the most recent mtime
 			if err == nil {
 				if info.ModTime().After(latestModTime) {
 					latestModTime = info.ModTime()
