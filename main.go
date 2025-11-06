@@ -117,7 +117,7 @@ func main() {
 	flag.Var(&excludes, "e", "Exclude pattern (can be specified multiple times)")
 	flag.BoolVar(&cfg.NoFstateWrite, "nostate", false, "Prevent writing/modifying .fstate files")
 	flag.BoolVar(&cfg.IgnoreBitrot, "nobitrot", false, "Disable bitrot detection logic")
-	flag.BoolVar(&debugEnabled, "debug", false, "Enable debug logging output to stderr") // ADDED: Debug flag
+	flag.BoolVar(&debugEnabled, "debug", false, "Enable debug logging output to stderr")
 
 	flag.Parse()
 	cfg.Excludes = excludes
