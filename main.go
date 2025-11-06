@@ -534,9 +534,24 @@ func (g *GitRepo) Process(cfg *Config) error {
 	// Centralized error handler for this function
 	handleGitError := func(err error) error {
 		g.Status = "X"
-		g.Hash = "0000000000000000"
-		g.Timestamp = time.Time{}
-		g.Error = err
+		g.Error = err // Store the original Git error
+
+		// As a fallback, try to get the state from the raw directory content.
+		// This provides a deterministic state even if Git commands fail.
+		dirHash, hashErr := hashDirectory(g.Path)
+		if hashErr != nil {
+			g.Hash = "----------------" // Fallback if hashing fails
+		} else {
+			g.Hash = dirHash
+		}
+
+		modTime, timeErr := getLatestModTimeInDir(g.Path)
+		if timeErr != nil {
+			g.Timestamp = time.Time{} // Fallback to zero time
+		} else {
+			g.Timestamp = modTime
+		}
+
 		return nil // Return nil to signal that the error has been handled locally
 	}
 
@@ -595,56 +610,77 @@ func (g *GitRepo) Process(cfg *Config) error {
 
 	} else {
 		g.Status = "!"
-		g.Timestamp = modTime
 
-		// Sort changes by path for deterministic hashing
-		sort.Slice(changes, func(i, j int) bool {
-			return changes[i].path < changes[j].path
-		})
-
-		var dirtyContent strings.Builder
-		for _, change := range changes {
-			fullPath := filepath.Join(g.Path, change.path)
-
-			// A status containing 'D' indicates a deletion.
-			if strings.Contains(change.status, "D") {
-				// For deleted items, we only hash the fact of their deletion.
-				fmt.Fprintf(&dirtyContent, "%s %s\n", change.status, change.path)
-				continue
-			}
-
-			// For any other change, check if it's a file or a directory.
-			info, err := os.Stat(fullPath)
+		// A newly initialized repo has no commits, so its state is the hash of all its contents.
+		// A dirty repo's state is the hash of its changes relative to HEAD.
+		if isEmptyRepo {
+			// TODO: hash and time calculations will be repeated in handleGitError, perform them only once perhaps
+			dirHash, err := hashDirectory(g.Path)
 			if err != nil {
-				// If path doesn't exist (e.g., deleted after status) or is inaccessible,
-				// we must still record this state for a deterministic hash.
-				fmt.Fprintf(&dirtyContent, "%s %s ERROR:%s\n", change.status, change.path, err.Error())
-				continue
+				// If we can't even hash the directory, it's a critical error.
+				return handleGitError(fmt.Errorf("could not hash directory for empty repo: %w", err))
 			}
+			g.Hash = dirHash
 
-			if info.IsDir() {
-				// Hash the entire directory's contents deterministically.
-				dirHash, err := hashDirectory(fullPath)
-				if err != nil {
-					// If hashing fails, record the error for a deterministic hash.
-					fmt.Fprintf(&dirtyContent, "%s %s TYPE:DIR ERROR:%s\n", change.status, change.path, err.Error())
-				} else {
-					fmt.Fprintf(&dirtyContent, "%s %s %s\n", change.status, change.path, dirHash)
+			latestTime, err := getLatestModTimeInDir(g.Path)
+			if err != nil {
+				// Similarly, if we can't get the mtime, treat it as a critical error.
+				return handleGitError(fmt.Errorf("could not get mod time for empty repo: %w", err))
+			}
+			g.Timestamp = latestTime
+		} else {
+			// This is a dirty repo with existing commits.
+			g.Timestamp = modTime
+
+			// Sort changes by path for deterministic hashing
+			sort.Slice(changes, func(i, j int) bool {
+				return changes[i].path < changes[j].path
+			})
+
+			var dirtyContent strings.Builder
+			for _, change := range changes {
+				fullPath := filepath.Join(g.Path, change.path)
+
+				// A status containing 'D' indicates a deletion.
+				if strings.Contains(change.status, "D") {
+					// For deleted items, we only hash the fact of their deletion.
+					fmt.Fprintf(&dirtyContent, "%s %s\n", change.status, change.path)
+					continue
 				}
-			} else {
-				// It's a file. Now we read its content to include in the hash.
-				// This restores the essential content-hashing logic.
-				content, err := os.ReadFile(fullPath)
+
+				// For any other change, check if it's a file or a directory.
+				info, err := os.Stat(fullPath)
 				if err != nil {
-					// Handle cases where the file is unreadable.
+					// If path doesn't exist (e.g., deleted after status) or is inaccessible,
+					// we must still record this state for a deterministic hash.
 					fmt.Fprintf(&dirtyContent, "%s %s ERROR:%s\n", change.status, change.path, err.Error())
 					continue
 				}
-				fmt.Fprintf(&dirtyContent, "%s %s\n", change.status, change.path)
-				dirtyContent.Write(content)
+
+				if info.IsDir() {
+					// Hash the entire directory's contents deterministically.
+					dirHash, err := hashDirectory(fullPath)
+					if err != nil {
+						// If hashing fails, record the error for a deterministic hash.
+						fmt.Fprintf(&dirtyContent, "%s %s TYPE:DIR ERROR:%s\n", change.status, change.path, err.Error())
+					} else {
+						fmt.Fprintf(&dirtyContent, "%s %s %s\n", change.status, change.path, dirHash)
+					}
+				} else {
+					// It's a file. Now we read its content to include in the hash.
+					// This restores the essential content-hashing logic.
+					content, err := os.ReadFile(fullPath)
+					if err != nil {
+						// Handle cases where the file is unreadable.
+						fmt.Fprintf(&dirtyContent, "%s %s ERROR:%s\n", change.status, change.path, err.Error())
+						continue
+					}
+					fmt.Fprintf(&dirtyContent, "%s %s\n", change.status, change.path)
+					dirtyContent.Write(content)
+				}
 			}
+			g.Hash = fmt.Sprintf("%016x", xxh3.HashString(dirtyContent.String()))
 		}
-		g.Hash = fmt.Sprintf("%016x", xxh3.HashString(dirtyContent.String()))
 	}
 	return nil
 }

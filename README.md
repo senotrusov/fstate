@@ -147,6 +147,23 @@ git ! 0f498c89b27a3c3d 2025-11-05T02:01:00.123Z app1/backend <main https://githu
 dir   1b676f44a30e8c4f 2025-11-05T03:30:00.000Z app1/images
 ```
 
+**Special Git statuses and states**
+
+`fstate` recognizes two special Git repository cases to provide complete state visibility:
+
+1. **Repository error (`X` status)**
+   The `X` status means a critical Git command (like `git status` or `git rev-parse`) failed in this directory. This usually indicates the directory is not a valid Git repository, is corrupted, or has insufficient permissions.
+
+   * **Hash/timestamp:** Set to a deterministic bucket-style hash/timestamp if possible.
+   * **Branch field:** Contains the full error message for diagnostics.
+
+2. **Empty repository (`!` status with `<[empty]>` branch)**
+   A newly initialized repository (`git init`) with no commits yet shows a dirty status (`!`) because it is in an incomplete state, and **HEAD** does not exist.
+
+   * **Hash/timestamp:** Calculated from any existing unstaged changes, or set to a bucket-style hash/timestamp if no files exist.
+   * **Branch field:** Replaced with the special indicator `<[empty]>`.
+
+
 #### Directory Bucket Line (`dir`)
 
 A directory is considered a “Bucket” if it contains at least one non-excluded file or if it already has a `.fstate` file (even an empty one).
