@@ -252,13 +252,15 @@ func buildEntityTree(cfg *Config) ([]Entity, error) {
 			// Check if the directory is an entity boundary
 			isGit := hasDirEntry(currentPath, gitDir)
 			isBucket := hasDirEntry(currentPath, fstateFile)
+			isRootInput := inputPathMap[currentPath]
 
-			if isGit || isBucket || inputPathMap[currentPath] {
+			// An entity is created if it's a git repo, has an .fstate file, or is a top-level input path.
+			if isGit || isBucket || isRootInput {
 				var newEntity Entity
 				if isGit {
 					newEntity = &GitRepo{Path: currentPath}
 				} else {
-					newEntity = &Bucket{Path: currentPath, isRootInput: inputPathMap[currentPath]}
+					newEntity = &Bucket{Path: currentPath, isRootInput: isRootInput}
 				}
 
 				// Find parent and attach, or add as a new root entity
@@ -269,7 +271,13 @@ func buildEntityTree(cfg *Config) ([]Entity, error) {
 					rootEntities = append(rootEntities, newEntity)
 				}
 				visited[currentPath] = true
-				return filepath.SkipDir // We've identified an entity, don't walk its children now
+
+				// Only skip if it's a "hard" boundary (a nested Git repo or .fstate bucket).
+				// If it's just a top-level directory given as input, we need to walk inside it
+				// to find any nested entities.
+				if isGit || isBucket {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		})
@@ -401,10 +409,10 @@ func (b *Bucket) Process(cfg *Config) error {
 		return err
 	}
 
-	// A bucket must contain files OR an .fstate file OR be a root input path.
-	// This prevents empty directories from being listed.
 	hasFstate := hasDirEntry(b.Path, fstateFile)
-	if len(files) == 0 && !hasFstate && !b.isRootInput {
+
+	// A directory is only a bucket if it contains actual files or an explicit .fstate file.
+	if len(files) == 0 && !hasFstate {
 		b.BucketHash = "" // Mark as non-bucket to be skipped during printing
 		return nil
 	}
