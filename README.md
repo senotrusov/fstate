@@ -197,6 +197,4 @@ By default, `fstate` runs in a "read-only" mode for new directories. It will sca
 
 **Bitrot Detection Logic:**
 
-Bitrot is detected only when a file's **modification timestamp (mtime) remains the same**, but its **XXH3 content hash has changed** compared to the hash recorded in the existing `.fstate`.
-
-*   **If Bitrot Detected:** A warning is printed to `stderr`, and the new state is written to **`.fstate-after-bitrot`** instead of overwriting `.fstate`. The user must manually inspect the situation and resolve the bitrot before promoting `.fstate-after-bitrot` to `.fstate`.
+Bitrot is identified when a file’s modification timestamp (mtime) has not changed, but its XXH3 content hash differs from the hash stored in the existing `.fstate` file. When this occurs, a warning is sent to stderr, and the new state is saved to `.fstate-after-bitrot` instead of overwriting `.fstate`. The user must then manually review the issue and resolve the bitrot before replacing `.fstate` with `.fstate-after-bitrot`.
