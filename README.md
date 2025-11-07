@@ -9,7 +9,7 @@ A lightweight, deterministic command-line utility for generating a human-readabl
 If you work on multiple computers (laptop, desktop, VM) and rely on manual or automatic synchronization, you know the pain:
 
 1.  **Slow, Automated Syncing:** Fully automatic sync services are often resource-intensive, slow, and prone to creating conflicts or disasters, especially with large codebases or vast amounts of data.
-2. **Lack of State Visibility:** You often don't know *which* machine has the latest version of a project or dataset, or even whether a specific project or data directory exists on it at all. This is especially true for folders containing things like **photos, video, datasets, or experimental output** that are not tracked by Git.
+2.  **Lack of State Visibility:** You often don't know *which* machine has the latest version of a project or dataset, or even whether a specific project or data directory exists on it at all. This is especially true for folders containing things like **photos, video, datasets, or experimental output** that are not tracked by Git.
 
 `fstate` solves this by giving you **state at a glance**:
 
@@ -81,7 +81,7 @@ When you specify multiple paths, `fstate` automatically calculates the **common 
 ```bash
 # On Machine A (where projects are in /home/user/code/)
 fstate ~/code/app1 ~/code/app2 ~/data/archive
-# Common root will be '/home/foo'.
+# Common root will be '/home/user'.
 
 # On Machine B (where projects are in /mnt/work/code/)
 fstate /mnt/work/code/app1 /mnt/work/code/app2 /mnt/work/archive
@@ -91,15 +91,35 @@ fstate /mnt/work/code/app1 /mnt/work/code/app2 /mnt/work/archive
 
 **2. Excluding directories and files**
 
-The `-e` flag lets you exclude specific files or directories from a scan. Exclusion patterns can either match any path component or be anchored to the **common root** by starting with `/`. The matching behavior is implemented using Go’s `filepath.Match`.
+The `-e` flag lets you exclude files or directories using patterns similar to `.gitignore`. The rules are processed in order, and the **last pattern that matches a path determines its fate**.
 
-```bash
-# Exclude all 'temp' directories and any files containing 'cache'
-fstate -e temp -e '*cache*' .
+Patterns can be specified multiple times. Matching is performed using Go’s `filepath.Match`.
 
-# Exclude only the 'vendor' directory at the root of the scan
-fstate -e /vendor .
-```
+*   **Component Pattern:** If a pattern does not start with `/`, it matches any component (file or directory name) in the path.
+    ```bash
+    # Exclude all directories named 'node_modules' and all files ending in '.log'
+    fstate -e 'node_modules' -e '*.log' .
+    ```
+
+*   **Anchored Pattern:** To match only at the root of the scan (relative to the common root), prefix the pattern with `/`.
+    ```bash
+    # Exclude the 'vendor' directory only at the top level, not 'app/vendor'
+    fstate -e /vendor .
+    ```
+
+*   **Negative Patterns (Re-inclusion):** You can re-include a file that was excluded by a previous pattern by prefixing the pattern with an exclamation mark (`!`).
+
+    > **Shell/Bash Warning:** The exclamation mark (`!`) is a special character in Bash and other shells that is used for history expansion. To use it as a literal character in a pattern, you **must** enclose the argument in single quotes (`'`) or escape it with a backslash (`\!`).
+
+    ```bash
+    # Exclude the entire 'logs' directory...
+    # ...but re-include 'important.log' from within it.
+    fstate -e '/logs' -e '!/logs/important.log' .
+
+    # Exclude all .tmp files...
+    # ...but do not exclude a specific file named 'final.tmp'
+    fstate -e '*.tmp' -e '!final.tmp' .
+    ```
 
 **3. Generating and Comparing State Files**
 
@@ -152,17 +172,17 @@ dir   1b676f44a30e8c4f 2025-11-05T03:30:00.000Z app1/images
 
 `fstate` recognizes two special Git repository cases to provide complete state visibility:
 
-1. **Repository error (`X` status)**
-   The `X` status means a critical Git command (like `git status` or `git rev-parse`) failed in this directory. This usually indicates the directory is not a valid Git repository, is corrupted, or has insufficient permissions.
+1.  **Repository error (`X` status)**
+    The `X` status means a critical Git command (like `git status` or `git rev-parse`) failed in this directory. This usually indicates the directory is not a valid Git repository, is corrupted, or has insufficient permissions.
 
-   * **Hash/timestamp:** Set to a deterministic bucket-style hash/timestamp if possible.
-   * **Branch field:** Contains the full error message for diagnostics.
+    *   **Hash/timestamp:** Set to a deterministic bucket-style hash/timestamp if possible.
+    *   **Branch field:** Contains the full error message for diagnostics.
 
-2. **Empty repository (`!` status with `<[empty]>` branch)**
-   A newly initialized repository (`git init`) with no commits yet shows a dirty status (`!`) because it is in an incomplete state, and **HEAD** does not exist.
+2.  **Empty repository (`!` status with `<[empty]>` branch)**
+    A newly initialized repository (`git init`) with no commits yet shows a dirty status (`!`) because it is in an incomplete state, and **HEAD** does not exist.
 
-   * **Hash/timestamp:** Calculated from any existing unstaged changes, or set to a bucket-style hash/timestamp if no files exist.
-   * **Branch field:** Replaced with the special indicator `<[empty]>`.
+    *   **Hash/timestamp:** Calculated from any existing unstaged changes, or set to a bucket-style hash/timestamp if no files exist.
+    *   **Branch field:** Replaced with the special indicator `<[empty]>`.
 
 
 #### Directory Bucket Line (`dir`)

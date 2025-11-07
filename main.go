@@ -927,7 +927,10 @@ func formatTimestamp(t time.Time) string {
 	return t.UTC().Format(iso8601Format)
 }
 
-// isExcluded checks if a path matches any of the exclusion patterns.
+// isExcluded checks if a path should be excluded based on a list of patterns.
+// It supports negative patterns (prefixed with '!') to re-include previously
+// excluded paths, similar to gitignore rules. The last pattern in the list
+// that matches the path determines whether it is excluded or included.
 func isExcluded(path, commonRoot string, patterns []string) bool {
 	relPath, err := filepath.Rel(commonRoot, path)
 	if err != nil {
@@ -936,24 +939,42 @@ func isExcluded(path, commonRoot string, patterns []string) bool {
 
 	components := strings.Split(relPath, string(os.PathSeparator))
 
+	// A path's exclusion status is determined by the last matching pattern.
+	// Default is to be included (not excluded).
+	excluded := false
+
 	for _, pattern := range patterns {
+		isNegative := strings.HasPrefix(pattern, "!")
+		if isNegative {
+			pattern = pattern[1:] // Trim '!'
+		}
+
+		matchFound := false
 		if strings.HasPrefix(pattern, "/") {
-			// Anchored pattern
-			match, _ := filepath.Match(strings.TrimPrefix(pattern, "/"), relPath)
-			if match {
-				return true
+			// Anchored pattern: matches against the full relative path
+			p := strings.TrimPrefix(pattern, "/")
+			if match, _ := filepath.Match(p, relPath); match {
+				matchFound = true
 			}
 		} else {
-			// Component pattern
+			// Component pattern: matches against any directory/file name component in the path
 			for _, component := range components {
-				match, _ := filepath.Match(pattern, component)
-				if match {
-					return true
+				if match, _ := filepath.Match(pattern, component); match {
+					matchFound = true
+					break // A component matched, no need to check others for this pattern
 				}
 			}
 		}
+
+		if matchFound {
+			// If it's a negative pattern (!), it's NOT excluded.
+			// If it's a positive pattern, it IS excluded.
+			// This updates the status based on the latest match.
+			excluded = !isNegative
+		}
 	}
-	return false
+
+	return excluded
 }
 
 // hasDirEntry checks for the existence of a file or directory in a given path without walking.
