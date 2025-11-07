@@ -466,18 +466,20 @@ func (b *Bucket) Process(cfg *Config) error {
 
 	// Step 1: Always check for bitrot if .fstate exists and bitrot detection is enabled.
 	if hasFstate && !cfg.IgnoreBitrot {
-		bitrotDetected, err := checkBitrot(existingFstatePath, b.files)
+		bitrottenFiles, err := checkBitrot(existingFstatePath, b.files)
 		if err != nil {
 			return fmt.Errorf("failed to check for bitrot in %s: %w", existingFstatePath, err)
 		}
 
-		if bitrotDetected {
-			// Always report bitrot to stderr.
-			fmt.Fprintf(os.Stderr, "warning: bitrot detected in bucket %s\n", b.Path)
+		if len(bitrottenFiles) > 0 {
+			for _, fileRelPath := range bitrottenFiles {
+				fullPath := filepath.Join(b.Path, fileRelPath)
+				fmt.Fprintf(os.Stderr, "bitrot warning: %s\n", fullPath)
+			}
 
 			// Only write the -after-bitrot file if writing is not explicitly disabled.
 			if !cfg.NoFstateWrite {
-				fmt.Fprintf(os.Stderr, " -> Writing new state to %s\n", fstateBitrotFile)
+				debugf("Bitrot detected in %s, writing new state to %s", b.Path, fstateBitrotFile)
 				bitrotFilePath := filepath.Join(b.Path, fstateBitrotFile)
 				return atomicWrite(bitrotFilePath, []byte(fstateString))
 			}
@@ -518,10 +520,10 @@ func (b *Bucket) Print(writer io.Writer, commonRoot string) {
 	fmt.Fprintf(writer, "dir   %s %s %s\n", b.BucketHash, formatTimestamp(b.Timestamp), relPath)
 }
 
-func checkBitrot(fstatePath string, currentFiles []FileState) (bool, error) {
+func checkBitrot(fstatePath string, currentFiles []FileState) ([]string, error) {
 	existingContent, err := os.ReadFile(fstatePath)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
 	existingState := make(map[string]FileState)
@@ -538,15 +540,21 @@ func checkBitrot(fstatePath string, currentFiles []FileState) (bool, error) {
 		existingState[parts[2]] = FileState{Hash: parts[0], Timestamp: ts, Path: parts[2]}
 	}
 
+	var bitrottenFiles []string
 	for _, currentFile := range currentFiles {
 		if oldFile, ok := existingState[currentFile.Path]; ok {
-			// Bitrot condition: same mtime, different hash
-			if oldFile.Timestamp.Equal(currentFile.Timestamp) && oldFile.Hash != currentFile.Hash {
-				return true, nil
+			// Truncate both timestamps to millisecond precision for a reliable comparison.
+			oldTs := oldFile.Timestamp.Truncate(time.Millisecond)
+			newTs := currentFile.Timestamp.Truncate(time.Millisecond)
+
+			// Bitrot condition: same mtime (at millisecond precision), different hash
+			if oldTs.Equal(newTs) && oldFile.Hash != currentFile.Hash {
+				bitrottenFiles = append(bitrottenFiles, currentFile.Path)
 			}
 		}
 	}
-	return false, nil
+
+	return bitrottenFiles, nil
 }
 
 // --- Git Repo Processing ---
