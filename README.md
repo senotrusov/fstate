@@ -1,4 +1,4 @@
-## fstate: The simple way to see what’s out of sync between your machines.
+## fstate: A lightweight inventory of your files, projects, and folders: see what each machine has or lacks, and what’s different, just by diffing one plain-text file.
 
 A lightweight, deterministic command-line utility for generating a human-readable, **hash-based state summary** of your **Git repositories** and **unversioned data folders** across multiple machines.
 
