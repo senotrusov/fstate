@@ -156,21 +156,60 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 5. Process each entity in the tree
+	// 5. Setup output writer
+	var writer io.Writer = os.Stdout
+	if cfg.OutputFile != "" {
+		f, err := os.Create(cfg.OutputFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating output file: %v\n", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		writer = f
+	}
+
+	// 6. Process and Print entities recursively
+	// Sort root entities for deterministic processing and output
+	sort.Slice(entities, func(i, j int) bool {
+		return entities[i].GetPath() < entities[j].GetPath()
+	})
+
 	for _, entity := range entities {
-		if err := processEntityRecursive(entity, cfg); err != nil {
-			// This block should now only be hit by critical, non-recoverable errors
-			// since GitRepo.Process() will no longer return errors for git failures.
+		if err := processAndPrintRecursive(writer, entity, cfg); err != nil {
+			// This will now catch critical, non-recoverable errors.
+			// GitRepo processing errors are handled internally and won't be returned here.
 			fmt.Fprintf(os.Stderr, "Error processing path %s: %v\n", entity.GetPath(), err)
 			os.Exit(1)
 		}
 	}
+}
 
-	// 6. Print the results
-	if err := printResults(entities, cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing output: %v\n", err)
-		os.Exit(1)
+// processAndPrintRecursive combines the processing and printing steps into a single
+// recursive walk. It processes an entity, prints its result immediately, and then
+// recursively calls itself for all children.
+func processAndPrintRecursive(writer io.Writer, entity Entity, cfg *Config) error {
+	// Step 1: Process the current entity (heavy work)
+	if err := entity.Process(cfg); err != nil {
+		// This error should only be returned for critical failures (e.g., file system errors).
+		// Git command failures are handled within GitRepo.Process itself.
+		return err
 	}
+
+	// Step 2: Print the result of the processed entity immediately
+	entity.Print(writer, cfg.CommonRoot)
+
+	// Step 3: Sort children by path for deterministic processing and output
+	sort.Slice(entity.GetChildren(), func(i, j int) bool {
+		return entity.GetChildren()[i].GetPath() < entity.GetChildren()[j].GetPath()
+	})
+
+	// Step 4: Recurse for each child
+	for _, child := range entity.GetChildren() {
+		if err := processAndPrintRecursive(writer, child, cfg); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // getCommonRoot calculates the longest common ancestor path from a list of paths.
@@ -316,53 +355,6 @@ func findEntities(cfg *Config) ([]Entity, error) {
 	}
 
 	return rootEntities, nil
-}
-
-// processEntityRecursive processes the given entity and all its children.
-func processEntityRecursive(entity Entity, cfg *Config) error {
-	if err := entity.Process(cfg); err != nil {
-		return err
-	}
-	// Sort children by path for deterministic processing and output
-	sort.Slice(entity.GetChildren(), func(i, j int) bool {
-		return entity.GetChildren()[i].GetPath() < entity.GetChildren()[j].GetPath()
-	})
-	for _, child := range entity.GetChildren() {
-		if err := processEntityRecursive(child, cfg); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// printResults writes the final output to the configured destination.
-func printResults(entities []Entity, cfg *Config) error {
-	var writer io.Writer = os.Stdout
-	if cfg.OutputFile != "" {
-		f, err := os.Create(cfg.OutputFile)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		writer = f
-	}
-
-	// Sort root entities for deterministic output
-	sort.Slice(entities, func(i, j int) bool {
-		return entities[i].GetPath() < entities[j].GetPath()
-	})
-
-	for _, entity := range entities {
-		printEntityRecursive(writer, entity, cfg.CommonRoot)
-	}
-	return nil
-}
-
-func printEntityRecursive(writer io.Writer, entity Entity, commonRoot string) {
-	entity.Print(writer, commonRoot)
-	for _, child := range entity.GetChildren() {
-		printEntityRecursive(writer, child, commonRoot)
-	}
 }
 
 // --- Bucket Processing ---
