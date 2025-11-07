@@ -68,7 +68,8 @@ fstate
 | :--- | :--- |
 | `-o <file>` | Write output to the specified file path (default: stdout). |
 | `-e <pattern>` | Exclude pattern (can be specified multiple times). |
-| `-nostate` | Prevent writing or modifying `.fstate` or `.fstate-after-bitrot` files. |
+| `-w` | Write `.fstate` files. Creates `.fstate` for new buckets and updates existing ones. |
+| `-nostate` | Do not write or modify any `.fstate` files. Overrides default behavior of updating existing files. Cannot be used with `-w`. |
 | `-nobitrot` | Disable the bitrot detection logic. |
 
 #### Examples
@@ -185,13 +186,14 @@ dir   1b676f44a30e8c4f 2025-11-05T03:30:00.000Z documents/photos-2024
 
 ### 🗃️ Bitrot & State File Management
 
-By default, `fstate` writes the calculated file manifest to a file named **`.fstate`** in the bucket's root directory.
+By default, `fstate` runs in a "read-only" mode for new directories. It will scan all directories and report their state, but will only *update* existing `.fstate` files. It will **not** create new `.fstate` files unless explicitly told to.
 
-| Flag | Behavior |
+| Flag / State | Behavior |
 | :--- | :--- |
-| **(Default)** | If `.fstate` exists, perform bitrot check. If clean, overwrite `.fstate`. |
-| **`--nostate`** | **Do not** write or modify `.fstate` or `.fstate-after-bitrot` files. Run purely as a scanner. |
-| **`--nobitrot`** | Ignore bitrot check. If `.fstate` exists, unconditionally overwrite it with the new state. |
+| **(Default)** | Scans all directories. **Updates** `.fstate` files if they already exist. Does **not create** new ones. |
+| **`-w`** | **Enables writing.** Creates new `.fstate` files for buckets that don't have one, and updates existing ones. |
+| **`-nostate`** | **Disables all writing.** Prevents both creation and updates of any `.fstate` or `.fstate-after-bitrot` files. Cannot be used with `-w`. |
+| **`-nobitrot`** | When writing is enabled (either by default or with `-w`), this flag disables the bitrot check and unconditionally overwrites `.fstate` with the new state. |
 
 **Bitrot Detection Logic:**
 

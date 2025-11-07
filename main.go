@@ -56,6 +56,7 @@ type Config struct {
 	OutputFile    string
 	Excludes      []string
 	NoFstateWrite bool
+	WriteFstate   bool
 	IgnoreBitrot  bool
 	CommonRoot    string
 }
@@ -116,11 +117,17 @@ func main() {
 	flag.StringVar(&cfg.OutputFile, "o", "", "Output file path (default: stdout)")
 	flag.Var(&excludes, "e", "Exclude pattern (can be specified multiple times)")
 	flag.BoolVar(&cfg.NoFstateWrite, "nostate", false, "Prevent writing/modifying .fstate files")
+	flag.BoolVar(&cfg.WriteFstate, "w", false, "Write .fstate files for all buckets (creates new, updates existing)")
 	flag.BoolVar(&cfg.IgnoreBitrot, "nobitrot", false, "Disable bitrot detection logic")
 	flag.BoolVar(&debugEnabled, "debug", false, "Enable debug logging output to stderr")
 
 	flag.Parse()
 	cfg.Excludes = excludes
+
+	if cfg.NoFstateWrite && cfg.WriteFstate {
+		fmt.Fprintln(os.Stderr, "Error: cannot use -nostate and -w flags at the same time.")
+		os.Exit(1)
+	}
 
 	// Initialize the logger to not show date/time prefixes for debug output
 	log.SetFlags(0)
@@ -455,22 +462,39 @@ func (b *Bucket) Process(cfg *Config) error {
 	fstateString := fstateContent.String()
 	b.BucketHash = fmt.Sprintf("%016x", xxh3.HashString(fstateString))
 
-	if cfg.NoFstateWrite {
-		return nil
-	}
-
-	// Bitrot detection logic
 	existingFstatePath := filepath.Join(b.Path, fstateFile)
-	if _, err := os.Stat(existingFstatePath); err == nil && !cfg.IgnoreBitrot {
+
+	// Step 1: Always check for bitrot if .fstate exists and bitrot detection is enabled.
+	if hasFstate && !cfg.IgnoreBitrot {
 		bitrotDetected, err := checkBitrot(existingFstatePath, b.files)
 		if err != nil {
 			return fmt.Errorf("failed to check for bitrot in %s: %w", existingFstatePath, err)
 		}
+
 		if bitrotDetected {
-			fmt.Fprintf(os.Stderr, "warning: bitrot detected in bucket %s. Writing new state to %s\n", b.Path, fstateBitrotFile)
-			bitrotFilePath := filepath.Join(b.Path, fstateBitrotFile)
-			return atomicWrite(bitrotFilePath, []byte(fstateString))
+			// Always report bitrot to stderr.
+			fmt.Fprintf(os.Stderr, "warning: bitrot detected in bucket %s\n", b.Path)
+
+			// Only write the -after-bitrot file if writing is not explicitly disabled.
+			if !cfg.NoFstateWrite {
+				fmt.Fprintf(os.Stderr, " -> Writing new state to %s\n", fstateBitrotFile)
+				bitrotFilePath := filepath.Join(b.Path, fstateBitrotFile)
+				return atomicWrite(bitrotFilePath, []byte(fstateString))
+			}
+			// If -nostate is on, we just report and do nothing else.
+			return nil
 		}
+	}
+
+	// Step 2: If no bitrot, proceed with normal write logic.
+	if cfg.NoFstateWrite {
+		return nil
+	}
+
+	// We write if -w is specified, OR if by default a .fstate file already exists.
+	shouldWrite := cfg.WriteFstate || hasFstate
+	if !shouldWrite {
+		return nil
 	}
 
 	// Default action: write to .fstate
