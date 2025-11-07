@@ -195,6 +195,6 @@ By default, `fstate` runs in a "read-only" mode for new directories. It will sca
 | **`-nostate`** | **Disables all writing.** Prevents both creation and updates of any `.fstate` or `.fstate-after-bitrot` files. Cannot be used with `-w`. |
 | **`-nobitrot`** | When writing is enabled (either by default or with `-w`), this flag disables the bitrot check and unconditionally overwrites `.fstate` with the new state. |
 
-**Bitrot Detection Logic:**
+**Bitrot Detection**
 
 Bitrot is identified when a file’s modification timestamp (mtime) has not changed, but its XXH3 content hash differs from the hash stored in the existing `.fstate` file. When this occurs, a warning is sent to stderr, and the new state is saved to `.fstate-after-bitrot` instead of overwriting `.fstate`. The user must then manually review the issue and resolve the bitrot before replacing `.fstate` with `.fstate-after-bitrot`.
