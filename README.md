@@ -4,7 +4,7 @@ A lightweight, deterministic command-line utility for generating a human-readabl
 
 ---
 
-### 🌟 Why `fstate`? (The Problem & The Solution)
+### 🌟 Why `fstate`?
 
 If you work on multiple computers (laptop, desktop, VM) and rely on manual or automatic synchronization, you know the pain:
 
