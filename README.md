@@ -17,7 +17,7 @@ The tool generates a single, deterministic **state summary** (`fstate` output) f
 
 *   **Project Inventory and Mapping:** You get a full, quick list of every Git repository and data folder present. Comparing the outputs from two machines immediately shows you **which projects/folders are missing** on one machine entirely, serving as a rapid inventory audit.
 *   **Project Status (Git Repos):** Which machine has a dirty Git repository (`!`) or unpushed commits (`=`). This is a quick way to audit the sync status of all your checked-out projects.
-*   **Data Integrity (Data Buckets):** Which data folders (e.g., photo archives, unversioned research data) are out of sync (different `BUCKET_HASH`).
+*   **Data Integrity (Data Buckets):** Which data folders (e.g., photo archives, unversioned research data) are out of sync (different `BUCKET_HASH`) or have suffered potential bitrot (`B`).
 *   **The Source of Truth:** The hashes communicate the current state of your files. You immediately know which computer holds the most current files, allowing you to execute a fast, predictable, one-way sync (e.g., using `rsync`) instead of a full, two-way, conflict-prone operation.
 
 ### 🚀 Features
@@ -25,7 +25,7 @@ The tool generates a single, deterministic **state summary** (`fstate` output) f
 *   **Deterministic Hashing:** Uses `xxh3` for high-speed, non-cryptographic, 16-character hashes for both file contents and overall directory states.
 *   **Git Repository Analysis:** Differentiates between clean, unpushed, and dirty states, providing the branch, commit hash, and upstream URL.
 *   **Directory "Buckets":** For non-versioned folders, `fstate` scans and creates a file manifest with each file’s path, hash, and timestamp, stored in a hidden **`.fstate`** file inside the folder. The `BUCKET_HASH` reflects this manifest’s state. You can easily compare two `.fstate` files (e.g., from desktop and laptop) with `diff` to see added, removed, or changed files.
-*   **Built-in Bitrot Detection:** Compares the current file mtime and hash against the existing `.fstate` file. If a file's mtime is the *same* but its hash is *different*, it indicates potential bitrot and writes the new state to a separate `.fstate-after-bitrot` file.
+*   **Built-in Bitrot Detection:** Compares the current file mtime and hash against the existing `.fstate` file. If a file's mtime is the *same* but its hash is *different*, it indicates potential bitrot. When this occurs, a `B` status is shown in the output, a warning is printed to `stderr` with the path of the affected file, and the new state is written to a separate `.fstate-after-bitrot` file.
 *   **Nested Entity Exclusion:** Automatically excludes any subdirectory that is itself a Git repository or another `fstate` bucket from its parent's hash calculation, ensuring clean, modular state tracking.
 *   **Common Root Relativity:** Automatically determines the longest common ancestor path for all input arguments, making output paths universally comparable across machines.
 
@@ -192,6 +192,7 @@ A directory is considered a “Bucket” if it contains at least one non-exclude
 | Field | Description |
 | :--- | :--- |
 | **`dir`** | Entity type indicator. |
+| **`<STATUS>`** | **Status.** `<space>` (OK), `B` (Bitrot detected). |
 | **`<BUCKET_HASH>`** | A 16-char **XXH3 hash** calculated from the *contents* of the in-memory `.fstate` file generated for the current scan. |
 | **`<TIMESTAMP>`** | Most recent modification time (`mtime`) of any file within this bucket's scope. |
 | **`<PATH>`** | Path relative to the **Common Root**. |
@@ -200,6 +201,7 @@ A directory is considered a “Bucket” if it contains at least one non-exclude
 
 ```
 dir   1b676f44a30e8c4f 2025-11-05T03:30:00.000Z documents/photos-2024
+dir B 8a2d4b9f6c1e0f3a 2025-11-04T11:20:00.000Z research/datasets/set1
 ```
 
 ---
@@ -217,4 +219,4 @@ By default, `fstate` runs in a "read-only" mode for new directories. It will sca
 
 **Bitrot Detection**
 
-Bitrot is identified when a file’s modification timestamp (mtime) has not changed, but its XXH3 content hash differs from the hash stored in the existing `.fstate` file. When this occurs, a warning is sent to stderr, and the new state is saved to `.fstate-after-bitrot` instead of overwriting `.fstate`. The user must then manually review the issue and resolve the bitrot before replacing `.fstate` with `.fstate-after-bitrot`.
+Bitrot is identified when a file’s modification timestamp (mtime) has not changed, but its XXH3 content hash differs from the hash stored in the existing `.fstate` file. When this occurs, the bucket receives a `B` status in the fstate output, a warning is sent to `stderr` with the path of the corrupted file, and the new state is saved to `.fstate-after-bitrot` instead of overwriting `.fstate`. The user must then manually review the issue and resolve the bitrot before replacing `.fstate` with `.fstate-after-bitrot`.

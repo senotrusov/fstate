@@ -75,6 +75,7 @@ type Bucket struct {
 	Timestamp  time.Time
 	Children   []Entity
 	files      []FileState
+	Status     string
 }
 
 // GitRepo represents a Git repository.
@@ -346,6 +347,7 @@ func findEntities(cfg *Config) ([]Entity, error) {
 // --- Bucket Processing ---
 
 func (b *Bucket) Process(cfg *Config) error {
+	b.Status = " "
 	var files []FileState
 	var latestModTime time.Time
 	var fileFound bool // To track if we found any regular files
@@ -482,6 +484,7 @@ func (b *Bucket) Process(cfg *Config) error {
 		}
 
 		if len(bitrottenFiles) > 0 {
+			b.Status = "B"
 			for _, fileRelPath := range bitrottenFiles {
 				fullPath := filepath.Join(b.Path, fileRelPath)
 				fmt.Fprintf(os.Stderr, "bitrot warning: %s\n", fullPath)
@@ -522,12 +525,8 @@ func (b *Bucket) Print(writer io.Writer, commonRoot string) {
 	if err != nil {
 		relPath = b.Path // Fallback
 	}
-	if relPath == "." && commonRoot == b.Path {
-		// Special case for when the single input is the current directory
-		relPath = ""
-	}
 
-	fmt.Fprintf(writer, "dir   %s %s %s\n", b.BucketHash, formatTimestamp(b.Timestamp), relPath)
+	fmt.Fprintf(writer, "dir %s %s %s %s\n", b.Status, b.BucketHash, formatTimestamp(b.Timestamp), relPath)
 }
 
 func checkBitrot(fstatePath string, currentFiles []FileState) ([]string, error) {
@@ -678,9 +677,6 @@ func (g *GitRepo) Print(writer io.Writer, commonRoot string) {
 	relPath, err := filepath.Rel(commonRoot, g.Path)
 	if err != nil {
 		relPath = g.Path // Fallback
-	}
-	if relPath == "." && commonRoot == g.Path {
-		relPath = ""
 	}
 
 	// Handle the error state print format
