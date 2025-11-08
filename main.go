@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -78,14 +79,16 @@ type Bucket struct {
 
 // GitRepo represents a Git repository.
 type GitRepo struct {
-	Path        string
-	Status      string
-	Hash        string
-	Timestamp   time.Time
-	Branch      string
-	UpstreamURL string
-	Children    []Entity
-	Error       error // Field to store processing errors
+	Path           string
+	Status         string
+	Hash           string
+	Timestamp      time.Time
+	Branch         string
+	UpstreamURL    string
+	UpstreamBranch string
+	AheadBehind    string
+	Children       []Entity
+	Error          error // Field to store processing errors
 }
 
 // --- Entity Interface Implementations ---
@@ -566,6 +569,22 @@ func checkBitrot(fstatePath string, currentFiles []FileState) ([]string, error) 
 
 // --- Git Repo Processing ---
 
+type gitChange struct {
+	status string
+	path   string
+}
+
+type gitStatusInfo struct {
+	Branch         string
+	UpstreamBranch string
+	AheadBehind    string
+	IsUnpushed     bool
+	IsDirty        bool
+	IsEmpty        bool
+	Changes        []gitChange
+	UpstreamURL    string
+}
+
 // Process gathers all state for a GitRepo. If any git command fails, it sets
 // the status to 'X', stores the error, and falls back to calculating directory state.
 // If the fallback filesystem calculation fails, a critical error is returned to terminate the program.
@@ -576,11 +595,9 @@ func (g *GitRepo) Process(cfg *Config) error {
 		g.Error = gitErr // Store the original Git error
 
 		// Fallback to calculating state directly from the filesystem.
-		// An error here is fatal for the whole program, as the filesystem
-		// is expected to be reliable.
+		// An error here is fatal for the whole program.
 		dirHash, modTime, fsErr := calculateDirectoryState(g.Path)
 		if fsErr != nil {
-			// Return the critical filesystem error to terminate the program.
 			return fmt.Errorf("filesystem error during git fallback for %s: %w", g.Path, fsErr)
 		}
 
@@ -590,32 +607,22 @@ func (g *GitRepo) Process(cfg *Config) error {
 		return nil // Return nil to signal the git error was handled, allowing program to continue.
 	}
 
-	// IsDirty, StatusChanges, LatestModTime
-	dirty, changes, modTime, err := gitGetStatus(g.Path)
+	statusInfo, err := gitGetStatus(g.Path)
 	if err != nil {
 		return handleGitError(fmt.Errorf("git status failed: %w", err))
 	}
 
-	var isEmptyRepo bool
-	g.Branch, err = gitExec(g.Path, "rev-parse", "--abbrev-ref", "HEAD")
-	if err != nil {
-		// A common reason for failure is an empty repository (no commits yet).
-		// In this case, 'HEAD' does not exist. We check the error message to confirm.
-		if strings.Contains(err.Error(), "unknown revision or path not in the working tree") ||
-			strings.Contains(err.Error(), "ambiguous argument 'HEAD'") {
-			isEmptyRepo = true
-			g.Branch = "[empty]"
-		} else {
-			return handleGitError(fmt.Errorf("could not get branch: %w", err))
-		}
+	g.Branch = statusInfo.Branch
+	// If the repository is empty (no commits), override the branch name to '[empty]'
+	// to match the specification, regardless of what the initial branch is called (e.g., 'main').
+	if statusInfo.IsEmpty {
+		g.Branch = "[empty]"
 	}
+	g.UpstreamURL = statusInfo.UpstreamURL
+	g.UpstreamBranch = statusInfo.UpstreamBranch
+	g.AheadBehind = statusInfo.AheadBehind
 
-	// This is a best-effort call; failure to get the upstream URL is not a critical error
-	// that should mark the repository as errored ('X').
-	g.UpstreamURL, _ = gitGetUpstreamURL(g.Path, g.Branch)
-
-	// A repo is "clean" only if it's not dirty and not empty.
-	if !dirty && !isEmptyRepo {
+	if !statusInfo.IsDirty && !statusInfo.IsEmpty {
 		g.Hash, err = gitExec(g.Path, "rev-parse", "HEAD")
 		if err != nil {
 			return handleGitError(fmt.Errorf("could not get HEAD commit hash: %w", err))
@@ -630,54 +637,40 @@ func (g *GitRepo) Process(cfg *Config) error {
 		fmt.Sscanf(commitTimeUnix, "%d", &commitTimeSec)
 		g.Timestamp = time.Unix(commitTimeSec, 0)
 
-		unpushed, err := gitIsUnpushed(g.Path)
-		if err != nil {
-			// If checking the push status fails, we can't be sure, but it's safer
-			// to not mark the whole repo as errored. We will just proceed as if it's pushed.
-			unpushed = false
-		}
-		if unpushed {
+		if statusInfo.IsUnpushed {
 			g.Status = "="
 		} else {
 			g.Status = " "
 		}
-
 	} else {
 		g.Status = "!"
 
-		// A newly initialized repo has no commits, so its state is the hash of all its contents.
-		// A dirty repo's state is the hash of its changes relative to HEAD.
-		if isEmptyRepo {
+		if statusInfo.IsEmpty {
 			dirHash, latestTime, err := calculateDirectoryState(g.Path)
 			if err != nil {
-				// A filesystem error here should be fatal.
 				return fmt.Errorf("could not calculate directory state for empty repo %s: %w", g.Path, err)
 			}
 			g.Hash = dirHash
 			g.Timestamp = latestTime
-		} else {
-			// This is a dirty repo with existing commits.
-			g.Timestamp = modTime
-
-			dirtyHash, err := calculateDirtyState(g.Path, changes)
+		} else { // Is dirty
+			dirtyHash, modTime, err := calculateDirtyState(g.Path, statusInfo.Changes)
 			if err != nil {
-				// An error occurred (e.g., permissions). Store it and trigger fallback.
 				g.Status = "X"
 				g.Error = err
-
 				// Fallback to calculating state directly from the filesystem.
 				dirHash, modTime, fsErr := calculateDirectoryState(g.Path)
 				if fsErr != nil {
-					// This is a critical failure.
 					return fmt.Errorf("filesystem error during git fallback for %s: %w", g.Path, fsErr)
 				}
 				g.Hash = dirHash
 				g.Timestamp = modTime
-				return nil // Handled successfully.
+				return nil
 			}
 			g.Hash = dirtyHash
+			g.Timestamp = modTime
 		}
 	}
+
 	return nil
 }
 
@@ -692,7 +685,6 @@ func (g *GitRepo) Print(writer io.Writer, commonRoot string) {
 
 	// Handle the error state print format
 	if g.Status == "X" {
-		// Sanitize the error message for single-line output
 		errorMsg := "unknown error"
 		if g.Error != nil {
 			errorMsg = strings.ReplaceAll(g.Error.Error(), "\n", " ")
@@ -701,130 +693,77 @@ func (g *GitRepo) Print(writer io.Writer, commonRoot string) {
 		return
 	}
 
-	branchInfo := g.Branch
-
-	if g.UpstreamURL != "" {
-		branchInfo = fmt.Sprintf("%s %s", g.Branch, g.UpstreamURL)
+	var branchInfoParts []string
+	if g.Branch != "" {
+		branchInfoParts = append(branchInfoParts, g.Branch)
 	}
 
+	// Handle upstream branch name difference
+	if g.UpstreamBranch != "" {
+		// e.g., 'origin/main'
+		remoteBranchName := g.UpstreamBranch
+		if slashIndex := strings.LastIndex(g.UpstreamBranch, "/"); slashIndex != -1 {
+			remoteBranchName = g.UpstreamBranch[slashIndex+1:]
+		}
+		if g.Branch != remoteBranchName && g.Branch != "(detached)" {
+			branchInfoParts = append(branchInfoParts, "->", g.UpstreamBranch)
+		}
+	}
+
+	// Add ahead/behind info
+	if g.AheadBehind != "" {
+		branchInfoParts = append(branchInfoParts, g.AheadBehind)
+	}
+
+	// Add upstream URL
+	if g.UpstreamURL != "" {
+		branchInfoParts = append(branchInfoParts, g.UpstreamURL)
+	}
+
+	branchInfo := strings.Join(branchInfoParts, " ")
 	fmt.Fprintf(writer, "git %s %s %s %s <%s>\n", g.Status, g.Hash, formatTimestamp(g.Timestamp), relPath, branchInfo)
 }
 
-type gitChange struct {
-	status string
-	path   string
-}
-
-// calculateDirtyState calculates a deterministic hash for the set of changes in a dirty
-// Git repository. It only considers regular files for hashing. If any file is unreadable
-// or a filesystem error occurs, it returns an error to signal a fallback is needed.
-func calculateDirtyState(repoPath string, changes []gitChange) (string, error) {
-	// Sort changes by path for deterministic hashing.
+// calculateDirtyState calculates a deterministic hash and finds the latest modification time for the
+// set of changes in a dirty Git repository. It only considers regular files for hashing.
+// If any file is unreadable or a filesystem error occurs, it returns an error to signal a fallback is needed.
+func calculateDirtyState(repoPath string, changes []gitChange) (hash string, latestModTime time.Time, err error) {
 	sort.Slice(changes, func(i, j int) bool {
 		return changes[i].path < changes[j].path
 	})
 
 	hasher := xxh3.New()
 	buf := make([]byte, hashBufferSize)
+	var hasNonDeletedChange bool
 
 	for _, change := range changes {
 		fullPath := filepath.Join(repoPath, change.path)
 
-		// For deleted items, we only hash the fact of their deletion.
 		if strings.Contains(change.status, "D") {
 			fmt.Fprintf(hasher, "%s %s\n", change.status, change.path)
 			continue
 		}
-
-		// For any other change, stat the file/dir to check its type.
-		info, err := os.Stat(fullPath)
-		if err != nil {
-			// If stat fails (e.g., permissions, or file disappeared),
-			// this is an error condition that should trigger the fallback.
-			return "", fmt.Errorf("could not stat changed path %s: %w", fullPath, err)
-		}
-
-		// Per requirements, we only hash regular files. Ignore symlinks, special files, directories etc.
-		if !info.Mode().IsRegular() {
-			continue // Skip non-regular files.
-		}
-
-		// It's a regular file. Stream its content into the hash.
-		fmt.Fprintf(hasher, "%s %s\n", change.status, change.path)
-		file, err := os.Open(fullPath)
-		if err != nil {
-			// Fail on permission error etc. to trigger fallback.
-			return "", fmt.Errorf("could not open changed file %s: %w", fullPath, err)
-		}
-
-		_, copyErr := io.CopyBuffer(hasher, file, buf)
-		file.Close() // Close file immediately after use.
-
-		if copyErr != nil {
-			// Fail on read error to trigger fallback.
-			return "", fmt.Errorf("could not read changed file %s: %w", fullPath, copyErr)
-		}
-	}
-	return fmt.Sprintf("%016x", hasher.Sum64()), nil
-}
-
-func gitGetStatus(repoPath string) (isDirty bool, changes []gitChange, latestModTime time.Time, err error) {
-	// Use the -z flag for more reliable parsing of paths, especially those with special characters.
-	// The output will be NUL-terminated.
-	output, err := gitExec(repoPath, "status", "--porcelain", "-z")
-	if err != nil {
-		return false, nil, time.Time{}, err
-	}
-	if len(output) == 0 {
-		return false, nil, time.Time{}, nil
-	}
-
-	var hasNonDeletedChange bool
-	// The output is a series of NUL-terminated strings.
-	entries := strings.Split(output, "\x00")
-	// The split results in an extra empty string at the end because of the trailing NUL.
-	for i := 0; i < len(entries)-1; i++ {
-		entry := entries[i]
-		if len(entry) < 4 {
-			continue
-		}
-
-		// Format is "XY PATH" or "XY OLDPATH<NUL>NEWPATH" for renames/copies
-		status := entry[:2]
-		pathInfo := entry[3:]
-		pathForStat := pathInfo
-
-		// For renames (R) and copies (C), the entry contains both paths.
-		// The next entry in the `entries` slice will be the new path.
-		if status[0] == 'R' || status[0] == 'C' {
-			// The current `pathInfo` is the old path. The new path is the next string.
-			i++ // Consume the next entry
-			pathForStat = entries[i]
-		}
-
-		changes = append(changes, gitChange{status: status, path: pathForStat})
-
-		if strings.Contains(status, "D") {
-			continue
-		}
-
 		hasNonDeletedChange = true
-		fullPath := filepath.Join(repoPath, pathForStat)
+
 		info, err := os.Stat(fullPath)
 		if err != nil {
-			continue // File might have disappeared since status was run.
+			return "", time.Time{}, fmt.Errorf("could not stat changed path %s: %w", fullPath, err)
 		}
+		currentModTime := info.ModTime()
 
-		var currentModTime time.Time
-		if info.IsDir() {
-			_, mtime, err := calculateDirectoryState(fullPath)
+		if info.Mode().IsRegular() {
+			fmt.Fprintf(hasher, "%s %s\n", change.status, change.path)
+			file, err := os.Open(fullPath)
 			if err != nil {
-				currentModTime = info.ModTime()
-			} else {
-				currentModTime = mtime
+				return "", time.Time{}, fmt.Errorf("could not open changed file %s: %w", fullPath, err)
 			}
-		} else {
-			currentModTime = info.ModTime()
+
+			_, copyErr := io.CopyBuffer(hasher, file, buf)
+			file.Close()
+
+			if copyErr != nil {
+				return "", time.Time{}, fmt.Errorf("could not read changed file %s: %w", fullPath, copyErr)
+			}
 		}
 
 		if currentModTime.After(latestModTime) {
@@ -832,14 +771,12 @@ func gitGetStatus(repoPath string) (isDirty bool, changes []gitChange, latestMod
 		}
 	}
 
-	// Special case: If the only changes are deletions, get mtime from parent dirs.
 	if !hasNonDeletedChange && len(changes) > 0 {
 		deletedFileDirs := make(map[string]bool)
 		for _, change := range changes {
 			dir := filepath.Dir(filepath.Join(repoPath, change.path))
 			deletedFileDirs[dir] = true
 		}
-
 		for dir := range deletedFileDirs {
 			info, err := os.Stat(dir)
 			if err == nil && info.ModTime().After(latestModTime) {
@@ -847,54 +784,93 @@ func gitGetStatus(repoPath string) (isDirty bool, changes []gitChange, latestMod
 			}
 		}
 	}
-
-	return true, changes, latestModTime, nil
+	return fmt.Sprintf("%016x", hasher.Sum64()), latestModTime, nil
 }
 
-func gitGetUpstreamURL(repoPath, branchName string) (string, error) {
-	remoteName, err := gitExec(repoPath, "config", "--get", fmt.Sprintf("branch.%s.remote", branchName))
-	if err != nil || remoteName == "" {
-		return "", errors.New("no remote configured for branch")
-	}
-
-	remoteURL, err := gitExec(repoPath, "config", "--get", fmt.Sprintf("remote.%s.url", remoteName))
+// gitGetStatus uses porcelain v2 to get a comprehensive repo status in one call.
+func gitGetStatus(repoPath string) (*gitStatusInfo, error) {
+	output, err := gitExec(repoPath, "status", "--porcelain=v2", "--branch", "-z")
 	if err != nil {
-		return "", fmt.Errorf("could not get URL for remote '%s'", remoteName)
-	}
-	return remoteURL, nil
-}
-
-func gitIsUnpushed(repoPath string) (bool, error) {
-	// Check if an upstream branch is configured
-	_, err := gitExec(repoPath, "rev-parse", "@{u}")
-	if err != nil {
-		// Fails if no upstream is configured, which is not a critical error.
-		return false, nil
+		return nil, err
 	}
 
-	// Get local and remote HEADs
-	localHead, err := gitExec(repoPath, "rev-parse", "HEAD")
-	if err != nil {
-		return false, err
-	}
-	remoteHead, err := gitExec(repoPath, "rev-parse", "@{u}")
-	if err != nil {
-		return false, err
-	}
-
-	// If they are different, there are unpushed/unpulled changes.
-	// We only care about unpushed, so we check if the upstream is an ancestor of local.
-	if localHead == remoteHead {
-		return false, nil
+	info := &gitStatusInfo{}
+	if len(output) == 0 {
+		if !hasDirEntry(repoPath, gitDir) {
+			return nil, errors.New("not a git repository")
+		}
+		info.IsEmpty = true
+		info.IsDirty = true // An empty, uncommitted repo is considered "dirty"
+		info.Branch = "[empty]"
+		return info, nil
 	}
 
-	mergeBase, err := gitExec(repoPath, "merge-base", "HEAD", "@{u}")
-	if err != nil {
-		return false, err
+	entries := strings.Split(output, "\x00")
+
+	for i := 0; i < len(entries)-1; i++ {
+		entry := entries[i]
+		if len(entry) == 0 {
+			continue
+		}
+
+		switch entry[0] {
+		case '#': // Header line
+			parts := strings.Fields(entry)
+			if len(parts) < 3 {
+				continue
+			}
+			switch parts[1] {
+			case "branch.head":
+				if parts[2] == "(no branch)" {
+					info.Branch = "[empty]"
+				} else {
+					info.Branch = parts[2]
+				}
+			case "branch.oid":
+				if parts[2] == "(initial)" {
+					info.IsEmpty = true
+				}
+			case "branch.upstream":
+				info.UpstreamBranch = parts[2]
+			case "branch.ab":
+				if len(parts) > 3 {
+					info.AheadBehind = fmt.Sprintf("%s %s", parts[2], parts[3])
+					ahead, _ := strconv.Atoi(strings.TrimPrefix(parts[2], "+"))
+					if ahead > 0 {
+						info.IsUnpushed = true
+					}
+				}
+			}
+		case '1', '2': // Changed tracked entry
+			info.IsDirty = true
+			parts := strings.Fields(entry) // NUL is only between paths
+			status := parts[1]
+			path := parts[8]
+			if entry[0] == '2' { // Rename/copy, path is followed by origPath
+				path = parts[9]
+			}
+			info.Changes = append(info.Changes, gitChange{status: status, path: path})
+		case '?': // Untracked
+			info.IsDirty = true
+			path := entry[2:]
+			info.Changes = append(info.Changes, gitChange{status: "??", path: path})
+		case 'u': // Unmerged
+			info.IsDirty = true
+			parts := strings.Fields(entry)
+			status := parts[1]
+			path := parts[len(parts)-1]
+			info.Changes = append(info.Changes, gitChange{status: status, path: path})
+		}
 	}
 
-	// If the merge base is the remote head, then local is ahead.
-	return mergeBase == remoteHead, nil
+	if info.Branch != "" && info.Branch != "[empty]" && info.Branch != "(detached)" {
+		remoteName, err := gitExec(repoPath, "config", "--get", fmt.Sprintf("branch.%s.remote", info.Branch))
+		if err == nil && remoteName != "" {
+			info.UpstreamURL, _ = gitExec(repoPath, "config", "--get", fmt.Sprintf("remote.%s.url", remoteName))
+		}
+	}
+
+	return info, nil
 }
 
 func gitExec(dir string, args ...string) (string, error) {
@@ -908,7 +884,7 @@ func gitExec(dir string, args ...string) (string, error) {
 		errMsg := fmt.Sprintf("git %s -> %s: %s", strings.Join(args, " "), err, stderr.String())
 		return "", errors.New(strings.TrimSpace(errMsg))
 	}
-	return stdout.String(), nil
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 // --- Utility Functions ---
