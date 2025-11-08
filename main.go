@@ -25,7 +25,7 @@ const (
 	iso8601Format    = "2006-01-02T15:04:05.000Z"
 	gitDir           = ".git"
 	hashLength       = 16
-	hashBufferSize   = 4 * 1024 * 1024 // 4 MiB buffer for hashing files
+	hashBufferSize   = 128 * 1024 // 128 KiB buffer for hashing files
 )
 
 // stringSliceFlag is a custom flag type to handle multiple occurrences of a string flag.
@@ -531,31 +531,27 @@ func checkBitrot(fstatePath string, currentFiles []FileState) ([]string, error) 
 // --- Git Repo Processing ---
 
 // Process gathers all state for a GitRepo. If any git command fails, it sets
-// the status to 'X', stores the error, and returns nil to allow the program to
-// continue processing other entities.
+// the status to 'X', stores the error, and falls back to calculating directory state.
+// If the fallback filesystem calculation fails, a critical error is returned to terminate the program.
 func (g *GitRepo) Process(cfg *Config) error {
-	// Centralized error handler for this function
-	handleGitError := func(err error) error {
+	// Centralized error handler for git commands.
+	handleGitError := func(gitErr error) error {
 		g.Status = "X"
-		g.Error = err // Store the original Git error
+		g.Error = gitErr // Store the original Git error
 
-		// As a fallback, try to get the state from the raw directory content.
-		// This provides a deterministic state even if Git commands fail.
-		dirHash, hashErr := hashDirectory(g.Path)
-		if hashErr != nil {
-			g.Hash = "----------------" // Fallback if hashing fails
-		} else {
-			g.Hash = dirHash
+		// Fallback to calculating state directly from the filesystem.
+		// An error here is fatal for the whole program, as the filesystem
+		// is expected to be reliable.
+		dirHash, modTime, fsErr := calculateDirectoryState(g.Path)
+		if fsErr != nil {
+			// Return the critical filesystem error to terminate the program.
+			return fmt.Errorf("filesystem error during git fallback for %s: %w", g.Path, fsErr)
 		}
 
-		modTime, timeErr := getLatestModTimeInDir(g.Path)
-		if timeErr != nil {
-			g.Timestamp = time.Time{} // Fallback to zero time
-		} else {
-			g.Timestamp = modTime
-		}
+		g.Hash = dirHash
+		g.Timestamp = modTime
 
-		return nil // Return nil to signal that the error has been handled locally
+		return nil // Return nil to signal the git error was handled, allowing program to continue.
 	}
 
 	// IsDirty, StatusChanges, LatestModTime
@@ -616,16 +612,12 @@ func (g *GitRepo) Process(cfg *Config) error {
 		// A newly initialized repo has no commits, so its state is the hash of all its contents.
 		// A dirty repo's state is the hash of its changes relative to HEAD.
 		if isEmptyRepo {
-			dirHash, err := hashDirectory(g.Path)
+			dirHash, latestTime, err := calculateDirectoryState(g.Path)
 			if err != nil {
-				return handleGitError(fmt.Errorf("could not hash directory for empty repo: %w", err))
+				// A filesystem error here should be fatal.
+				return fmt.Errorf("could not calculate directory state for empty repo %s: %w", g.Path, err)
 			}
 			g.Hash = dirHash
-
-			latestTime, err := getLatestModTimeInDir(g.Path)
-			if err != nil {
-				return handleGitError(fmt.Errorf("could not get mod time for empty repo: %w", err))
-			}
 			g.Timestamp = latestTime
 		} else {
 			// This is a dirty repo with existing commits.
@@ -661,9 +653,10 @@ func (g *GitRepo) Process(cfg *Config) error {
 
 				if info.IsDir() {
 					// Hash the entire directory's contents deterministically.
-					dirHash, err := hashDirectory(fullPath)
+					// Since this is for a dirty repo, an error here should contribute
+					// to the hash, not terminate the program. We use the new state function.
+					dirHash, _, err := calculateDirectoryState(fullPath)
 					if err != nil {
-						// If hashing fails, record the error for a deterministic hash.
 						fmt.Fprintf(hasher, "%s %s TYPE:DIR ERROR:%s\n", change.status, change.path, err.Error())
 					} else {
 						fmt.Fprintf(hasher, "%s %s %s\n", change.status, change.path, dirHash)
@@ -760,10 +753,12 @@ func gitGetStatus(repoPath string) (isDirty bool, changes []gitChange, latestMod
 			var currentModTime time.Time
 			if info.IsDir() {
 				// Walk the directory to find the latest mtime of any file inside.
-				currentModTime, err = getLatestModTimeInDir(fullPath)
+				_, mtime, err := calculateDirectoryState(fullPath)
 				if err != nil {
 					// If we can't walk the dir, fall back to the dir's own mtime.
 					currentModTime = info.ModTime()
+				} else {
+					currentModTime = mtime
 				}
 			} else {
 				// It's a file.
@@ -840,6 +835,91 @@ func gitExec(dir string, args ...string) (string, error) {
 
 // --- Utility Functions ---
 
+// calculateDirectoryState walks a directory to calculate a deterministic hash and find the
+// most recent modification time in a single pass. It only considers regular files
+// and ignores the .git directory. Any filesystem error encountered during this process
+// is considered fatal and will be returned, stopping the program.
+func calculateDirectoryState(rootPath string) (string, time.Time, error) {
+	hasher := xxh3.New()
+	var latestModTime time.Time
+	var fileCount int
+	// Allocate buffer once and reuse it for all file reads in this walk.
+	buf := make([]byte, hashBufferSize)
+
+	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// This error comes from WalkDir itself (e.g., permissions on a directory).
+			return err
+		}
+
+		// Skip the .git directory entirely.
+		if d.IsDir() && d.Name() == gitDir {
+			return filepath.SkipDir
+		}
+		if d.IsDir() {
+			return nil // Continue walking
+		}
+
+		// We only care about normal files. Ignore symlinks, pipes, etc.
+		if !d.Type().IsRegular() {
+			return nil
+		}
+
+		// From here, we have a regular file.
+		fileCount++
+
+		info, err := d.Info()
+		if err != nil {
+			// Failed to get file info (e.g., permissions, race condition)
+			return fmt.Errorf("could not get file info for %s: %w", path, err)
+		}
+
+		// Update most recent mtime.
+		modTime := info.ModTime()
+		if modTime.After(latestModTime) {
+			latestModTime = modTime
+		}
+
+		// Add file path to hash for determinism.
+		relPath, err := filepath.Rel(rootPath, path)
+		if err != nil {
+			return fmt.Errorf("could not get relative path for %s: %w", path, err)
+		}
+		hasher.WriteString(relPath)
+
+		// Add file content to hash.
+		file, err := os.Open(path)
+		if err != nil {
+			// Failed to open file (e.g., permissions)
+			return fmt.Errorf("could not open file %s: %w", path, err)
+		}
+		defer file.Close()
+
+		if _, err := io.CopyBuffer(hasher, file, buf); err != nil {
+			// Failed to read file content.
+			return fmt.Errorf("could not read file content from %s: %w", path, err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return "", time.Time{}, err
+	}
+
+	// Special case: if there are no files (just a .git dir), get mtime from the root folder itself.
+	if fileCount == 0 {
+		info, err := os.Stat(rootPath)
+		if err != nil {
+			return "", time.Time{}, fmt.Errorf("could not stat root directory %s for mtime: %w", rootPath, err)
+		}
+		latestModTime = info.ModTime()
+	}
+
+	hash := fmt.Sprintf("%016x", hasher.Sum64())
+	return hash, latestModTime, nil
+}
+
 // hashFileChunked calculates the xxh3 hash of a file by reading it in chunks.
 // This is memory-efficient for large files.
 func hashFileChunked(path string) (string, error) {
@@ -857,72 +937,6 @@ func hashFileChunked(path string) (string, error) {
 
 	hash := fmt.Sprintf("%016x", hasher.Sum64())
 	return hash, nil
-}
-
-// hashDirectory calculates a single hash for an entire directory structure.
-// It walks the directory, hashing file contents and relative paths in a deterministic order.
-func hashDirectory(rootPath string) (string, error) {
-	fileHashes := make(map[string]string)
-	var paths []string // To sort the keys of the map
-
-	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() {
-			relPath, err := filepath.Rel(rootPath, path)
-			if err != nil {
-				return err
-			}
-
-			hash, err := hashFileChunked(path)
-			if err != nil {
-				// Hash the error message to make it deterministic if a file becomes unreadable.
-				fileHashes[relPath] = fmt.Sprintf("ERROR:%s", err.Error())
-			} else {
-				fileHashes[relPath] = hash
-			}
-			paths = append(paths, relPath)
-		}
-		return nil
-	})
-
-	if err != nil {
-		return "", err
-	}
-
-	// Sort paths for deterministic order
-	sort.Strings(paths)
-
-	// Create a single string buffer to hash
-	var contentToHash strings.Builder
-	for _, path := range paths {
-		fmt.Fprintf(&contentToHash, "%s %s\n", fileHashes[path], path)
-	}
-
-	finalHash := fmt.Sprintf("%016x", xxh3.HashString(contentToHash.String()))
-	return finalHash, nil
-}
-
-// getLatestModTimeInDir walks a directory and returns the most recent modification time
-// of any file or subdirectory within it.
-func getLatestModTimeInDir(rootPath string) (time.Time, error) {
-	var latestTime time.Time
-	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		info, err := d.Info()
-		if err != nil {
-			// Can happen if file is deleted during the walk, just skip it.
-			return nil
-		}
-		if info.ModTime().After(latestTime) {
-			latestTime = info.ModTime()
-		}
-		return nil
-	})
-	return latestTime, err
 }
 
 // formatTimestamp converts a time.Time to the required ISO 8601 format.
