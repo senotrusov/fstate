@@ -747,9 +747,17 @@ func calculateDirtyState(repoPath string, changes []gitChange) (hash string, lat
 
 		info, err := os.Stat(fullPath)
 		if err != nil {
-			return "", time.Time{}, fmt.Errorf("could not stat changed path %s: %w", fullPath, err)
+			// If stat fails, it could be a broken symlink. Use Lstat as a fallback
+			// to get info about the symlink itself.
+			info, err = os.Lstat(fullPath)
+			if err != nil {
+				// If Lstat also fails, then we can't get any info, so we error out.
+				return "", time.Time{}, fmt.Errorf("could not stat changed path %s: %w", fullPath, err)
+			}
 		}
 		currentModTime := info.ModTime()
+
+		// TODO: Feed hasher with symlink targets?
 
 		if info.Mode().IsRegular() {
 			fmt.Fprintf(hasher, "%s %s\n", change.status, change.path)
