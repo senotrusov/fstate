@@ -801,14 +801,15 @@ func gitGetStatus(repoPath string) (*gitStatusInfo, error) {
 		}
 		info.IsEmpty = true
 		info.IsDirty = true // An empty, uncommitted repo is considered "dirty"
-		info.Branch = "[empty]"
 		return info, nil
 	}
 
-	entries := strings.Split(output, "\x00")
+	// Records are terminated by a NUL byte.
+	// The final record after the split will be empty.
+	records := strings.Split(output, "\x00")
 
-	for i := 0; i < len(entries)-1; i++ {
-		entry := entries[i]
+	for i := 0; i < len(records)-1; i++ {
+		entry := records[i]
 		if len(entry) == 0 {
 			continue
 		}
@@ -821,11 +822,7 @@ func gitGetStatus(repoPath string) (*gitStatusInfo, error) {
 			}
 			switch parts[1] {
 			case "branch.head":
-				if parts[2] == "(no branch)" {
-					info.Branch = "[empty]"
-				} else {
-					info.Branch = parts[2]
-				}
+				info.Branch = parts[2] // e.g., "main" or "(detached)"
 			case "branch.oid":
 				if parts[2] == "(initial)" {
 					info.IsEmpty = true
@@ -841,29 +838,47 @@ func gitGetStatus(repoPath string) (*gitStatusInfo, error) {
 					}
 				}
 			}
-		case '1', '2': // Changed tracked entry
+		case '1': // Ordinary changed entry
 			info.IsDirty = true
-			parts := strings.Fields(entry) // NUL is only between paths
+			// 1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
+			// Split into 9 parts to isolate the path, which is the 9th part.
+			parts := strings.SplitN(entry, " ", 9)
+			if len(parts) < 9 {
+				continue
+			}
 			status := parts[1]
 			path := parts[8]
-			if entry[0] == '2' { // Rename/copy, path is followed by origPath
-				path = parts[9]
+			info.Changes = append(info.Changes, gitChange{status: status, path: path})
+		case '2': // Renamed or copied entry
+			info.IsDirty = true
+			// 2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>
+			// The next record is <origPath>, which we must skip.
+			parts := strings.SplitN(entry, " ", 10)
+			if len(parts) < 10 {
+				continue
 			}
+			status := parts[1]
+			path := parts[9] // This is the new path (<path>)
+			info.Changes = append(info.Changes, gitChange{status: status, path: path})
+			i++ // IMPORTANT: Advance loop to skip the <origPath> record.
+		case 'u': // Unmerged entry
+			info.IsDirty = true
+			// u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>
+			parts := strings.SplitN(entry, " ", 11)
+			if len(parts) < 11 {
+				continue
+			}
+			status := parts[1]
+			path := parts[10]
 			info.Changes = append(info.Changes, gitChange{status: status, path: path})
 		case '?': // Untracked
 			info.IsDirty = true
 			path := entry[2:]
 			info.Changes = append(info.Changes, gitChange{status: "??", path: path})
-		case 'u': // Unmerged
-			info.IsDirty = true
-			parts := strings.Fields(entry)
-			status := parts[1]
-			path := parts[len(parts)-1]
-			info.Changes = append(info.Changes, gitChange{status: status, path: path})
 		}
 	}
 
-	if info.Branch != "" && info.Branch != "[empty]" && info.Branch != "(detached)" {
+	if info.Branch != "" && info.Branch != "(detached)" {
 		remoteName, err := gitExec(repoPath, "config", "--get", fmt.Sprintf("branch.%s.remote", info.Branch))
 		if err == nil && remoteName != "" {
 			info.UpstreamURL, _ = gitExec(repoPath, "config", "--get", fmt.Sprintf("remote.%s.url", remoteName))
