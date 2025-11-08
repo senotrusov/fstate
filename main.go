@@ -659,64 +659,23 @@ func (g *GitRepo) Process(cfg *Config) error {
 			// This is a dirty repo with existing commits.
 			g.Timestamp = modTime
 
-			// Sort changes by path for deterministic hashing
-			sort.Slice(changes, func(i, j int) bool {
-				return changes[i].path < changes[j].path
-			})
+			dirtyHash, err := calculateDirtyState(g.Path, changes)
+			if err != nil {
+				// An error occurred (e.g., permissions). Store it and trigger fallback.
+				g.Status = "X"
+				g.Error = err
 
-			hasher := xxh3.New()
-			// Define buffer once to avoid re-allocation in the loop.
-			buf := make([]byte, hashBufferSize)
-
-			for _, change := range changes {
-				fullPath := filepath.Join(g.Path, change.path)
-
-				// A status containing 'D' indicates a deletion.
-				if strings.Contains(change.status, "D") {
-					// For deleted items, we only hash the fact of their deletion.
-					fmt.Fprintf(hasher, "%s %s\n", change.status, change.path)
-					continue
+				// Fallback to calculating state directly from the filesystem.
+				dirHash, modTime, fsErr := calculateDirectoryState(g.Path)
+				if fsErr != nil {
+					// This is a critical failure.
+					return fmt.Errorf("filesystem error during git fallback for %s: %w", g.Path, fsErr)
 				}
-
-				// For any other change, check if it's a file or a directory.
-				info, err := os.Stat(fullPath)
-				if err != nil {
-					// If path doesn't exist (e.g., deleted after status) or is inaccessible,
-					// we must still record this state for a deterministic hash.
-					fmt.Fprintf(hasher, "%s %s ERROR:%s\n", change.status, change.path, err.Error())
-					continue
-				}
-
-				if info.IsDir() {
-					// Hash the entire directory's contents deterministically.
-					// Since this is for a dirty repo, an error here should contribute
-					// to the hash, not terminate the program. We use the new state function.
-					dirHash, _, err := calculateDirectoryState(fullPath)
-					if err != nil {
-						fmt.Fprintf(hasher, "%s %s TYPE:DIR ERROR:%s\n", change.status, change.path, err.Error())
-					} else {
-						fmt.Fprintf(hasher, "%s %s %s\n", change.status, change.path, dirHash)
-					}
-				} else {
-					// It's a file. Stream its content into the hash.
-					fmt.Fprintf(hasher, "%s %s\n", change.status, change.path)
-					file, err := os.Open(fullPath)
-					if err != nil {
-						// Handle cases where the file is unreadable after stat.
-						fmt.Fprintf(hasher, "ERROR:%s\n", err.Error())
-						continue
-					}
-
-					_, copyErr := io.CopyBuffer(hasher, file, buf)
-					file.Close() // Close file immediately after use.
-
-					if copyErr != nil {
-						// If reading the file fails mid-way, record it for a deterministic hash.
-						fmt.Fprintf(hasher, "COPY_ERROR:%s\n", copyErr.Error())
-					}
-				}
+				g.Hash = dirHash
+				g.Timestamp = modTime
+				return nil // Handled successfully.
 			}
-			g.Hash = fmt.Sprintf("%016x", hasher.Sum64())
+			g.Hash = dirtyHash
 		}
 	}
 	return nil
@@ -756,8 +715,63 @@ type gitChange struct {
 	path   string
 }
 
+// calculateDirtyState calculates a deterministic hash for the set of changes in a dirty
+// Git repository. It only considers regular files for hashing. If any file is unreadable
+// or a filesystem error occurs, it returns an error to signal a fallback is needed.
+func calculateDirtyState(repoPath string, changes []gitChange) (string, error) {
+	// Sort changes by path for deterministic hashing.
+	sort.Slice(changes, func(i, j int) bool {
+		return changes[i].path < changes[j].path
+	})
+
+	hasher := xxh3.New()
+	buf := make([]byte, hashBufferSize)
+
+	for _, change := range changes {
+		fullPath := filepath.Join(repoPath, change.path)
+
+		// For deleted items, we only hash the fact of their deletion.
+		if strings.Contains(change.status, "D") {
+			fmt.Fprintf(hasher, "%s %s\n", change.status, change.path)
+			continue
+		}
+
+		// For any other change, stat the file/dir to check its type.
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			// If stat fails (e.g., permissions, or file disappeared),
+			// this is an error condition that should trigger the fallback.
+			return "", fmt.Errorf("could not stat changed path %s: %w", fullPath, err)
+		}
+
+		// Per requirements, we only hash regular files. Ignore symlinks, special files, directories etc.
+		if !info.Mode().IsRegular() {
+			continue // Skip non-regular files.
+		}
+
+		// It's a regular file. Stream its content into the hash.
+		fmt.Fprintf(hasher, "%s %s\n", change.status, change.path)
+		file, err := os.Open(fullPath)
+		if err != nil {
+			// Fail on permission error etc. to trigger fallback.
+			return "", fmt.Errorf("could not open changed file %s: %w", fullPath, err)
+		}
+
+		_, copyErr := io.CopyBuffer(hasher, file, buf)
+		file.Close() // Close file immediately after use.
+
+		if copyErr != nil {
+			// Fail on read error to trigger fallback.
+			return "", fmt.Errorf("could not read changed file %s: %w", fullPath, copyErr)
+		}
+	}
+	return fmt.Sprintf("%016x", hasher.Sum64()), nil
+}
+
 func gitGetStatus(repoPath string) (isDirty bool, changes []gitChange, latestModTime time.Time, err error) {
-	output, err := gitExec(repoPath, "status", "--porcelain")
+	// Use the -z flag for more reliable parsing of paths, especially those with special characters.
+	// The output will be NUL-terminated.
+	output, err := gitExec(repoPath, "status", "--porcelain", "-z")
 	if err != nil {
 		return false, nil, time.Time{}, err
 	}
@@ -765,47 +779,75 @@ func gitGetStatus(repoPath string) (isDirty bool, changes []gitChange, latestMod
 		return false, nil, time.Time{}, nil
 	}
 
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		if len(line) < 4 {
+	var hasNonDeletedChange bool
+	// The output is a series of NUL-terminated strings.
+	entries := strings.Split(output, "\x00")
+	// The split results in an extra empty string at the end because of the trailing NUL.
+	for i := 0; i < len(entries)-1; i++ {
+		entry := entries[i]
+		if len(entry) < 4 {
 			continue
 		}
-		// Keep the original 2-character status for a more accurate hash.
-		status := line[:2]
-		path := line[3:]
 
-		changes = append(changes, gitChange{status: status, path: path})
+		// Format is "XY PATH" or "XY OLDPATH<NUL>NEWPATH" for renames/copies
+		status := entry[:2]
+		pathInfo := entry[3:]
+		pathForStat := pathInfo
 
-		// For deleted files, we don't have an mtime.
-		// The status for a file deleted from the index is " D".
-		if !strings.Contains(status, "D") {
-			fullPath := filepath.Join(repoPath, path)
-			info, err := os.Stat(fullPath)
+		// For renames (R) and copies (C), the entry contains both paths.
+		// The next entry in the `entries` slice will be the new path.
+		if status[0] == 'R' || status[0] == 'C' {
+			// The current `pathInfo` is the old path. The new path is the next string.
+			i++ // Consume the next entry
+			pathForStat = entries[i]
+		}
+
+		changes = append(changes, gitChange{status: status, path: pathForStat})
+
+		if strings.Contains(status, "D") {
+			continue
+		}
+
+		hasNonDeletedChange = true
+		fullPath := filepath.Join(repoPath, pathForStat)
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			continue // File might have disappeared since status was run.
+		}
+
+		var currentModTime time.Time
+		if info.IsDir() {
+			_, mtime, err := calculateDirectoryState(fullPath)
 			if err != nil {
-				// Ignore errors, file might be gone after status check.
-				continue
-			}
-
-			var currentModTime time.Time
-			if info.IsDir() {
-				// Walk the directory to find the latest mtime of any file inside.
-				_, mtime, err := calculateDirectoryState(fullPath)
-				if err != nil {
-					// If we can't walk the dir, fall back to the dir's own mtime.
-					currentModTime = info.ModTime()
-				} else {
-					currentModTime = mtime
-				}
-			} else {
-				// It's a file.
 				currentModTime = info.ModTime()
+			} else {
+				currentModTime = mtime
 			}
+		} else {
+			currentModTime = info.ModTime()
+		}
 
-			if currentModTime.After(latestModTime) {
-				latestModTime = currentModTime
+		if currentModTime.After(latestModTime) {
+			latestModTime = currentModTime
+		}
+	}
+
+	// Special case: If the only changes are deletions, get mtime from parent dirs.
+	if !hasNonDeletedChange && len(changes) > 0 {
+		deletedFileDirs := make(map[string]bool)
+		for _, change := range changes {
+			dir := filepath.Dir(filepath.Join(repoPath, change.path))
+			deletedFileDirs[dir] = true
+		}
+
+		for dir := range deletedFileDirs {
+			info, err := os.Stat(dir)
+			if err == nil && info.ModTime().After(latestModTime) {
+				latestModTime = info.ModTime()
 			}
 		}
 	}
+
 	return true, changes, latestModTime, nil
 }
 
@@ -866,7 +908,7 @@ func gitExec(dir string, args ...string) (string, error) {
 		errMsg := fmt.Sprintf("git %s -> %s: %s", strings.Join(args, " "), err, stderr.String())
 		return "", errors.New(strings.TrimSpace(errMsg))
 	}
-	return strings.TrimSpace(stdout.String()), nil
+	return stdout.String(), nil
 }
 
 // --- Utility Functions ---
