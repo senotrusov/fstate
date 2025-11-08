@@ -937,8 +937,6 @@ func isExcluded(path, commonRoot string, patterns []string) bool {
 		relPath = path // Fallback
 	}
 
-	components := strings.Split(relPath, string(os.PathSeparator))
-
 	// A path's exclusion status is determined by the last matching pattern.
 	// Default is to be included (not excluded).
 	excluded := false
@@ -954,11 +952,22 @@ func isExcluded(path, commonRoot string, patterns []string) bool {
 			// Anchored pattern: matches against the full relative path
 			p := strings.TrimPrefix(pattern, "/")
 			if match, _ := filepath.Match(p, relPath); match {
-				matchFound = true
+				// The special path "." should only be matched by an explicit "."
+				// pattern, not a wildcard pattern like ".*" that is intended
+				// for hidden files.
+				if relPath != "." || p == "." {
+					matchFound = true
+				}
 			}
 		} else {
 			// Component pattern: matches against any directory/file name component in the path
+			components := strings.Split(relPath, string(os.PathSeparator))
 			for _, component := range components {
+				// Similarly, the special component "." should only be matched
+				// by an explicit "." pattern.
+				if component == "." && pattern != "." {
+					continue
+				}
 				if match, _ := filepath.Match(pattern, component); match {
 					matchFound = true
 					break // A component matched, no need to check others for this pattern
