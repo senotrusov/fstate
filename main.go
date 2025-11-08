@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,16 +26,6 @@ const (
 	gitDir           = ".git"
 	hashLength       = 16
 )
-
-// debugEnabled is a package-level variable to control debug logging.
-var debugEnabled bool
-
-// debugf prints formatted debug messages to stderr if the -debug flag is enabled.
-func debugf(format string, v ...interface{}) {
-	if debugEnabled {
-		log.Printf("DEBUG: "+format, v...)
-	}
-}
 
 // stringSliceFlag is a custom flag type to handle multiple occurrences of a string flag.
 type stringSliceFlag []string
@@ -119,7 +108,6 @@ func main() {
 	flag.BoolVar(&cfg.NoFstateWrite, "nostate", false, "Prevent writing/modifying .fstate files")
 	flag.BoolVar(&cfg.WriteFstate, "w", false, "Write .fstate files for all buckets (creates new, updates existing)")
 	flag.BoolVar(&cfg.IgnoreBitrot, "nobitrot", false, "Disable bitrot detection logic")
-	flag.BoolVar(&debugEnabled, "debug", false, "Enable debug logging output to stderr")
 
 	flag.Parse()
 	cfg.Excludes = excludes
@@ -128,9 +116,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error: cannot use -nostate and -w flags at the same time.")
 		os.Exit(1)
 	}
-
-	// Initialize the logger to not show date/time prefixes for debug output
-	log.SetFlags(0)
 
 	// 2. Determine input paths
 	cfg.InputPaths = flag.Args()
@@ -145,9 +130,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error calculating common root: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Log the final configuration if debug is enabled
-	debugf("Configuration complete: %+v", *cfg)
 
 	// 4. Discover all entities (explicit and implicit)
 	entities, err := findEntities(cfg)
@@ -381,8 +363,6 @@ func (b *Bucket) Process(cfg *Config) error {
 		}
 
 		if isExcluded(path, cfg.CommonRoot, cfg.Excludes) {
-			// Log ignored paths within a bucket
-			debugf("Excluding path within bucket '%s': %s", b.Path, path)
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -471,7 +451,6 @@ func (b *Bucket) Process(cfg *Config) error {
 
 			// Only write the -after-bitrot file if writing is not explicitly disabled.
 			if !cfg.NoFstateWrite {
-				debugf("Bitrot detected in %s, writing new state to %s", b.Path, fstateBitrotFile)
 				bitrotFilePath := filepath.Join(b.Path, fstateBitrotFile)
 				return atomicWrite(bitrotFilePath, []byte(fstateString))
 			}
@@ -623,7 +602,6 @@ func (g *GitRepo) Process(cfg *Config) error {
 		if err != nil {
 			// If checking the push status fails, we can't be sure, but it's safer
 			// to not mark the whole repo as errored. We will just proceed as if it's pushed.
-			debugf("Could not check unpushed status for %s: %v", g.Path, err)
 			unpushed = false
 		}
 		if unpushed {
