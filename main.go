@@ -25,6 +25,7 @@ const (
 	iso8601Format    = "2006-01-02T15:04:05.000Z"
 	gitDir           = ".git"
 	hashLength       = 16
+	hashBufferSize   = 4 * 1024 * 1024 // 4 MiB buffer for hashing files
 )
 
 // stringSliceFlag is a custom flag type to handle multiple occurrences of a string flag.
@@ -389,11 +390,10 @@ func (b *Bucket) Process(cfg *Config) error {
 		}
 		modTime := info.ModTime()
 
-		content, err := os.ReadFile(path)
+		hash, err := hashFileChunked(path)
 		if err != nil {
 			return err
 		}
-		hash := fmt.Sprintf("%016x", xxh3.Hash(content))
 
 		files = append(files, FileState{
 			Path:      relPath,
@@ -616,17 +616,14 @@ func (g *GitRepo) Process(cfg *Config) error {
 		// A newly initialized repo has no commits, so its state is the hash of all its contents.
 		// A dirty repo's state is the hash of its changes relative to HEAD.
 		if isEmptyRepo {
-			// TODO: hash and time calculations will be repeated in handleGitError, perform them only once perhaps
 			dirHash, err := hashDirectory(g.Path)
 			if err != nil {
-				// If we can't even hash the directory, it's a critical error.
 				return handleGitError(fmt.Errorf("could not hash directory for empty repo: %w", err))
 			}
 			g.Hash = dirHash
 
 			latestTime, err := getLatestModTimeInDir(g.Path)
 			if err != nil {
-				// Similarly, if we can't get the mtime, treat it as a critical error.
 				return handleGitError(fmt.Errorf("could not get mod time for empty repo: %w", err))
 			}
 			g.Timestamp = latestTime
@@ -639,14 +636,17 @@ func (g *GitRepo) Process(cfg *Config) error {
 				return changes[i].path < changes[j].path
 			})
 
-			var dirtyContent strings.Builder
+			hasher := xxh3.New()
+			// Define buffer once to avoid re-allocation in the loop.
+			buf := make([]byte, hashBufferSize)
+
 			for _, change := range changes {
 				fullPath := filepath.Join(g.Path, change.path)
 
 				// A status containing 'D' indicates a deletion.
 				if strings.Contains(change.status, "D") {
 					// For deleted items, we only hash the fact of their deletion.
-					fmt.Fprintf(&dirtyContent, "%s %s\n", change.status, change.path)
+					fmt.Fprintf(hasher, "%s %s\n", change.status, change.path)
 					continue
 				}
 
@@ -655,7 +655,7 @@ func (g *GitRepo) Process(cfg *Config) error {
 				if err != nil {
 					// If path doesn't exist (e.g., deleted after status) or is inaccessible,
 					// we must still record this state for a deterministic hash.
-					fmt.Fprintf(&dirtyContent, "%s %s ERROR:%s\n", change.status, change.path, err.Error())
+					fmt.Fprintf(hasher, "%s %s ERROR:%s\n", change.status, change.path, err.Error())
 					continue
 				}
 
@@ -664,24 +664,30 @@ func (g *GitRepo) Process(cfg *Config) error {
 					dirHash, err := hashDirectory(fullPath)
 					if err != nil {
 						// If hashing fails, record the error for a deterministic hash.
-						fmt.Fprintf(&dirtyContent, "%s %s TYPE:DIR ERROR:%s\n", change.status, change.path, err.Error())
+						fmt.Fprintf(hasher, "%s %s TYPE:DIR ERROR:%s\n", change.status, change.path, err.Error())
 					} else {
-						fmt.Fprintf(&dirtyContent, "%s %s %s\n", change.status, change.path, dirHash)
+						fmt.Fprintf(hasher, "%s %s %s\n", change.status, change.path, dirHash)
 					}
 				} else {
-					// It's a file. Now we read its content to include in the hash.
-					// This restores the essential content-hashing logic.
-					content, err := os.ReadFile(fullPath)
+					// It's a file. Stream its content into the hash.
+					fmt.Fprintf(hasher, "%s %s\n", change.status, change.path)
+					file, err := os.Open(fullPath)
 					if err != nil {
-						// Handle cases where the file is unreadable.
-						fmt.Fprintf(&dirtyContent, "%s %s ERROR:%s\n", change.status, change.path, err.Error())
+						// Handle cases where the file is unreadable after stat.
+						fmt.Fprintf(hasher, "ERROR:%s\n", err.Error())
 						continue
 					}
-					fmt.Fprintf(&dirtyContent, "%s %s\n", change.status, change.path)
-					dirtyContent.Write(content)
+
+					_, copyErr := io.CopyBuffer(hasher, file, buf)
+					file.Close() // Close file immediately after use.
+
+					if copyErr != nil {
+						// If reading the file fails mid-way, record it for a deterministic hash.
+						fmt.Fprintf(hasher, "COPY_ERROR:%s\n", copyErr.Error())
+					}
 				}
 			}
-			g.Hash = fmt.Sprintf("%016x", xxh3.HashString(dirtyContent.String()))
+			g.Hash = fmt.Sprintf("%016x", hasher.Sum64())
 		}
 	}
 	return nil
@@ -834,6 +840,25 @@ func gitExec(dir string, args ...string) (string, error) {
 
 // --- Utility Functions ---
 
+// hashFileChunked calculates the xxh3 hash of a file by reading it in chunks.
+// This is memory-efficient for large files.
+func hashFileChunked(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	hasher := xxh3.New()
+	buf := make([]byte, hashBufferSize)
+	if _, err := io.CopyBuffer(hasher, file, buf); err != nil {
+		return "", err
+	}
+
+	hash := fmt.Sprintf("%016x", hasher.Sum64())
+	return hash, nil
+}
+
 // hashDirectory calculates a single hash for an entire directory structure.
 // It walks the directory, hashing file contents and relative paths in a deterministic order.
 func hashDirectory(rootPath string) (string, error) {
@@ -850,12 +875,12 @@ func hashDirectory(rootPath string) (string, error) {
 				return err
 			}
 
-			content, err := os.ReadFile(path)
+			hash, err := hashFileChunked(path)
 			if err != nil {
 				// Hash the error message to make it deterministic if a file becomes unreadable.
 				fileHashes[relPath] = fmt.Sprintf("ERROR:%s", err.Error())
 			} else {
-				fileHashes[relPath] = fmt.Sprintf("%016x", xxh3.Hash(content))
+				fileHashes[relPath] = hash
 			}
 			paths = append(paths, relPath)
 		}
