@@ -345,20 +345,25 @@ func findEntities(cfg *Config) ([]Entity, error) {
 func (b *Bucket) Process(cfg *Config) error {
 	var files []FileState
 	var latestModTime time.Time
+	var fileFound bool // To track if we found any regular files
+
 	nestedEntityPaths := make(map[string]bool)
 	for _, child := range b.Children {
 		nestedEntityPaths[child.GetPath()] = true
 	}
 
-	err := filepath.WalkDir(b.Path, func(path string, d fs.DirEntry, err error) error {
+	// Single walk to gather file info, calculate hashes, and find the latest mtime.
+	// Any error returned from this walk is considered fatal and will terminate the program.
+	walkErr := filepath.WalkDir(b.Path, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// Error from WalkDir itself, e.g., permission error on a directory.
 			return err
 		}
 		if path == b.Path {
-			return nil // Skip the root directory itself
+			return nil // Skip the root directory itself.
 		}
 
-		// Check for nested entities to exclude their contents
+		// Skip nested entities (Git repos or other buckets).
 		if nestedEntityPaths[path] {
 			return filepath.SkipDir
 		}
@@ -370,31 +375,40 @@ func (b *Bucket) Process(cfg *Config) error {
 			return nil
 		}
 
-		if d.IsDir() {
-			return nil // Continue walking
+		// We only care about normal files. Ignore symlinks, dirs, pipes, etc.
+		if !d.Type().IsRegular() {
+			return nil
 		}
 
-		// Don't include the state file itself in its own state
-		if filepath.Base(path) == fstateFile || filepath.Base(path) == fstateBitrotFile {
+		// Ignore .fstate files from hash and mtime calculation.
+		baseName := filepath.Base(path)
+		if baseName == fstateFile || baseName == fstateBitrotFile {
 			return nil
+		}
+
+		// From here, we have a regular file to process.
+		fileFound = true
+
+		// Get FileInfo.
+		info, err := d.Info()
+		if err != nil {
+			return fmt.Errorf("could not get file info for %s: %w", path, err)
+		}
+
+		// Hash the file content.
+		hash, err := hashFileChunked(path)
+		if err != nil {
+			// This covers read errors.
+			return fmt.Errorf("could not hash file %s: %w", path, err)
 		}
 
 		relPath, err := filepath.Rel(b.Path, path)
 		if err != nil {
-			return err
+			// This should not happen if path is inside b.Path.
+			return fmt.Errorf("could not get relative path for %s: %w", path, err)
 		}
 
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
 		modTime := info.ModTime()
-
-		hash, err := hashFileChunked(path)
-		if err != nil {
-			return err
-		}
-
 		files = append(files, FileState{
 			Path:      relPath,
 			Hash:      hash,
@@ -404,35 +418,55 @@ func (b *Bucket) Process(cfg *Config) error {
 		if modTime.After(latestModTime) {
 			latestModTime = modTime
 		}
+
 		return nil
 	})
 
-	if err != nil {
-		return err
+	if walkErr != nil {
+		return walkErr // Propagate fatal error to terminate the program.
 	}
 
 	hasFstate := hasDirEntry(b.Path, fstateFile)
 
-	// A directory is only a bucket if it contains actual files or an explicit .fstate file.
-	if len(files) == 0 && !hasFstate {
-		b.BucketHash = "" // Mark as non-bucket to be skipped during printing
+	// A directory is only a bucket if it contains files or an explicit .fstate file.
+	if !fileFound && !hasFstate {
+		b.BucketHash = "" // Mark as non-bucket to be skipped during printing.
 		return nil
 	}
 
-	// Sort files by path for deterministic .fstate content
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Path < files[j].Path
-	})
-	b.files = files
-	b.Timestamp = latestModTime
+	// Handle mtime and hash calculation based on whether files were found.
+	var fstateString string
+	if !fileFound {
+		// Case: No regular files, but .fstate exists.
+		// Obtain mtime from the bucket folder itself.
+		info, err := os.Stat(b.Path)
+		if err != nil {
+			return fmt.Errorf("could not stat bucket directory %s for mtime: %w", b.Path, err)
+		}
+		b.Timestamp = info.ModTime()
 
-	// Generate the content for the .fstate file
-	var fstateContent strings.Builder
-	for _, f := range b.files {
-		fmt.Fprintf(&fstateContent, "%s %s %s\n", f.Hash, formatTimestamp(f.Timestamp), f.Path)
+		// Bucket hash is from an empty buffer.
+		b.BucketHash = fmt.Sprintf("%016x", xxh3.HashString(""))
+		fstateString = "" // No files, so content is empty.
+	} else {
+		// Case: Regular files were found.
+		b.Timestamp = latestModTime
+
+		// Sort files by path for deterministic .fstate content and hash.
+		sort.Slice(files, func(i, j int) bool {
+			return files[i].Path < files[j].Path
+		})
+
+		var fstateContent strings.Builder
+		for _, f := range files {
+			fmt.Fprintf(&fstateContent, "%s %s %s\n", f.Hash, formatTimestamp(f.Timestamp), f.Path)
+		}
+		fstateString = fstateContent.String()
+		b.BucketHash = fmt.Sprintf("%016x", xxh3.HashString(fstateString))
 	}
-	fstateString := fstateContent.String()
-	b.BucketHash = fmt.Sprintf("%016x", xxh3.HashString(fstateString))
+	b.files = files
+
+	// --- Bitrot detection and .fstate writing logic ---
 
 	existingFstatePath := filepath.Join(b.Path, fstateFile)
 
@@ -440,6 +474,7 @@ func (b *Bucket) Process(cfg *Config) error {
 	if hasFstate && !cfg.IgnoreBitrot {
 		bitrottenFiles, err := checkBitrot(existingFstatePath, b.files)
 		if err != nil {
+			// An error here should also be fatal.
 			return fmt.Errorf("failed to check for bitrot in %s: %w", existingFstatePath, err)
 		}
 
@@ -449,12 +484,13 @@ func (b *Bucket) Process(cfg *Config) error {
 				fmt.Fprintf(os.Stderr, "bitrot warning: %s\n", fullPath)
 			}
 
-			// Only write the -after-bitrot file if writing is not explicitly disabled.
 			if !cfg.NoFstateWrite {
 				bitrotFilePath := filepath.Join(b.Path, fstateBitrotFile)
-				return atomicWrite(bitrotFilePath, []byte(fstateString))
+				// Writing the new state is a critical operation.
+				if err := atomicWrite(bitrotFilePath, []byte(fstateString)); err != nil {
+					return fmt.Errorf("failed to write bitrot state file for %s: %w", b.Path, err)
+				}
 			}
-			// If -nostate is on, we just report and do nothing else.
 			return nil
 		}
 	}
@@ -464,14 +500,14 @@ func (b *Bucket) Process(cfg *Config) error {
 		return nil
 	}
 
-	// We write if -w is specified, OR if by default a .fstate file already exists.
-	shouldWrite := cfg.WriteFstate || hasFstate
-	if !shouldWrite {
-		return nil
+	// Write if -w is specified, OR if a .fstate file already exists.
+	if cfg.WriteFstate || hasFstate {
+		if err := atomicWrite(existingFstatePath, []byte(fstateString)); err != nil {
+			return fmt.Errorf("failed to write state file for %s: %w", b.Path, err)
+		}
 	}
 
-	// Default action: write to .fstate
-	return atomicWrite(existingFstatePath, []byte(fstateString))
+	return nil
 }
 
 func (b *Bucket) Print(writer io.Writer, commonRoot string) {
