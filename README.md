@@ -1,32 +1,24 @@
-## fstate: A lightweight inventory of your files, projects, and folders: see what each machine has or lacks, and what’s different, just by diffing one plain-text file.
+## fstate: a lightweight inventory of your files, projects, and folders
 
-A lightweight, deterministic command-line utility for generating a human-readable, **hash-based state summary** of your **Git repositories** and **unversioned data folders** across multiple machines.
+`fstate` is a lightweight, deterministic command-line utility for generating a human-readable, hash-based summary of your Git repositories and unversioned data folders. Its goal is simple: to describe your filesystem in a single, deterministic text file, a plain-text inventory that captures the exact state of your projects and data.
 
----
+If you use multiple computers, like a laptop, desktop, or virtual machine, it can be tricky to keep everything in sync. By comparing (`diff`-ing) fstate summaries between computers, you can instantly see:
 
-### 🌟 Why `fstate`?
+* Which projects or folders exist on one machine but not another
+* Which Git repositories have uncommitted or unpushed changes
+* Which unversioned data folders (for example, photos, research data, archives) have changed, gone out of sync, or even suffered bit rot
 
-If you work on multiple computers (laptop, desktop, VM) and rely on manual or automatic synchronization, you know the pain:
+With this visibility, you can immediately determine which computer holds the most current files. From there, you can perform standard Git operations to commit and push/pull changes, and for unversioned data, perform a fast, predictable one-way sync (for example, using `rsync`). You can also copy projects across machines if you notice that one computer has them while another does not.
 
-1.  **Slow, Automated Syncing:** Fully automatic sync services are often resource-intensive, slow, and prone to creating conflicts or disasters, especially with large codebases or vast amounts of data.
-2.  **Lack of State Visibility:** You often don't know *which* machine has the latest version of a project or dataset, or even whether a specific project or data directory exists on it at all. This is especially true for folders containing things like **photos, video, datasets, or experimental output** that are not tracked by Git.
-
-`fstate` solves this by giving you **state at a glance**:
-
-The tool generates a single, deterministic **state summary** (`fstate` output) for any set of directories. By comparing the tiny `fstate` output files from different computers, you can instantly determine:
-
-*   **Project Inventory and Mapping:** You get a full, quick list of every Git repository and data folder present. Comparing the outputs from two machines immediately shows you **which projects/folders are missing** on one machine entirely, serving as a rapid inventory audit.
-*   **Project Status (Git Repos):** Which machine has a dirty Git repository (`!`) or unpushed commits (`=`). This is a quick way to audit the sync status of all your checked-out projects.
-*   **Data Integrity (Data Buckets):** Which data folders (e.g., photo archives, unversioned research data) are out of sync (different `BUCKET_HASH`) or have suffered potential bitrot (`B`).
-*   **The Source of Truth:** The hashes communicate the current state of your files. You immediately know which computer holds the most current files, allowing you to execute a fast, predictable, one-way sync (e.g., using `rsync`) instead of a full, two-way, conflict-prone operation.
+All of this helps you manage your files across multiple machines without relying on automated n-way synchronization tools, which often come with their own set of problems.
 
 ### 🚀 Features
 
-*   **Deterministic Hashing:** Uses `xxh3` for high-speed, non-cryptographic, 16-character hashes for both file contents and overall directory states.
-*   **Git Repository Analysis:** Differentiates between clean, unpushed, and dirty states, providing the branch, commit hash, and upstream URL.
-*   **Directory "Buckets":** For non-versioned folders, `fstate` scans and creates a file manifest with each file’s path, hash, and timestamp, stored in a hidden **`.fstate`** file inside the folder. The `BUCKET_HASH` reflects this manifest’s state. You can easily compare two `.fstate` files (e.g., from desktop and laptop) with `diff` to see added, removed, or changed files.
-*   **Built-in Bitrot Detection:** Compares the current file mtime and hash against the existing `.fstate` file. If a file's mtime is the *same* but its hash is *different*, it indicates potential bitrot. When this occurs, a `B` status is shown in the output, a warning is printed to `stderr` with the path of the affected file, and the new state is written to a separate `.fstate-after-bitrot` file.
+*   **Git Repository Analysis:** Summarizes the state of any Git repository in two concise lines, showing its status (clean, ahead, dirty, or error), commit or content hash, last modification time, and relative path on the first line, followed by branch relationships, ahead/behind counts, and the remote URL on the second.
+*   **Directory buckets:** For non-versioned folders, `fstate` uses a simple heuristic to group directories into meaningful “buckets,” working with or without user-provided hints. Each bucket is displayed as a single-line summary. Additionally, `fstate` may maintain a hidden **`.fstate`** file inside the bucket containing a manifest of file paths, hashes, and timestamps.
 *   **Nested Entity Exclusion:** Automatically excludes any subdirectory that is itself a Git repository or another `fstate` bucket from its parent's hash calculation, ensuring clean, modular state tracking.
+*   **Deterministic Hashing:** Uses `xxh3` for high-speed, non-cryptographic, 16-character hashes for both file contents and overall directory states.
+*   **Built-in Bitrot Detection:** Compares the current file mtime and hash against the existing `.fstate` file. If a file's mtime is the *same* but its hash is *different*, it indicates potential bitrot.
 *   **Common Root Relativity:** Automatically determines the longest common ancestor path for all input arguments, making output paths universally comparable across machines.
 
 ---
@@ -60,6 +52,12 @@ The simplest way to run `fstate` is to scan the current directory:
 
 ```bash
 fstate
+```
+
+Alternatively, you can scan your home folder while ignoring all dotfiles except `.password-store`:
+
+```bash
+fstate -e '/.*' -e '!/.password-store' ~
 ```
 
 #### Options
@@ -130,11 +128,7 @@ The recommended workflow is to output the state to a file on each machine, typic
 fstate -o "$(uname -n)".fstate ~/projects /data/photos
 ```
 
-The resulting state files (e.g., `desktop.fstate`, `laptop.fstate`) are small and can be easily exchanged via any method:
-
-*   **Network File Share** (NFS, Samba)
-*   **Transfer tools** (scp, rsync)
-*   **Git-controlled Notes** or a dedicated sync folder
+The resulting state files (e.g., `desktop.fstate`, `laptop.fstate`) are small and can be easily shared through various methods, such as network transfer or a Git repository containing your notes.
 
 Once the files are accessible, you can use `diff` to compare the states:
 
@@ -147,43 +141,68 @@ The output of the `diff` immediately points to the projects or data buckets that
 
 The final output is sorted deterministically and printed line-by-line.
 
-#### Git Repository Line (`git`)
+#### Git Repository Lines (`git`)
 
-Generated for any directory containing a `.git` folder.
+Generated for any directory containing a `.git` folder. The state of a Git repository is always described across two lines.
 
-| Field | Description | Clean (`<space>` / `=`) | Dirty (`!`) |
-| :--- | :--- | :--- | :--- |
-| **`git`** | Entity type indicator. | | |
-| **`<STATUS>`** | **Status.** | `<space>`(Up-to-Date with Upstream), `=` (Ahead of Upstream) | `!` (Uncommitted changes) |
-| **`<HASH>`** | **Summary Hash.** | First 16 chars of the HEAD commit SHA-1. | A 16-character XXH3 hash derived from all changed file contents and paths (staged, unstaged, untracked, and deleted). |
-| **`<TIMESTAMP>`** | **Modification Time.** | Commit time of HEAD. | The most recent modification time (`mtime`) among all changed files. |
-| **`<PATH>`** | Path relative to the **Common Root**. | | |
-| **`<BRANCH>`** | Short name of the current branch. | | |
-| **`<UPSTREAM_URL>`** | URL of the configured upstream remote. | | |
+**First Line: Core State**
 
-**Example Git Output:**
+| Field | Description | Clean (`<space>` / `=`) | Dirty (`!`) | Error (`X`) |
+| :--- | :--- | :--- | :--- | :--- |
+| **`git`** | Entity type indicator. | | | |
+| **`<STATUS>`** | **Status.** | `<space>`(Up-to-Date with Upstream), `=` (Ahead of Upstream) | `!` (Uncommitted changes) | `X` (Error) |
+| **`<HASH>`** | **Summary Hash.** | First 16 chars of the HEAD commit SHA-1. | A 16-character XXH3 hash derived from all changed file contents and paths (staged, unstaged, untracked, and deleted). | A hash of the directory contents. |
+| **`<TIMESTAMP>`** | **Modification Time.** | Commit time of HEAD. | The most recent mtime among all changed files. | The most recent mtime of any file. |
+| **`<PATH>`** | Path relative to the **Common Root**. | | | |
 
+**Second Line: Branch and Remote Details**
+
+The second line is indented and its components are space-separated.
+
+| Component | Description | Example |
+| :--- | :--- | :--- |
+| **`<LOCAL_BRANCH>`** | The short name of the current local branch. | `main` |
+| `-> <UPSTREAM_BRANCH>` | *(Optional)* Appears if the local branch name is different from its remote tracking branch. `<UPSTREAM_BRANCH>` is the full name of the remote branch. | `dev -> origin/main` |
+| **`<AHEAD/BEHIND>`** | Commit counts ahead (`+A`) and behind (`-B`) the upstream branch. | `+1 -0` |
+| **`<UPSTREAM_URL>`** | The URL of the `origin` or upstream remote. | `https://github.com/user/repo.git` |
+
+**Example Git Outputs:**
+
+A repository that is clean and has one commit to push:
 ```
-git ! 0f498c89b27a3c3d 2025-11-05T02:01:00.123Z app1/backend <main https://github.com/user/app1>
-dir   1b676f44a30e8c4f 2025-11-05T03:30:00.000Z app1/images
+git = fc11021421e20e19 2025-05-09T11:09:12.000Z project-a
+      main +1 -0 https://github.com/user/project-a.git
+```
+
+A repository where the local branch `feature` tracks a different remote branch `origin/main`:
+```
+git = ab118c89b27a3c3d 2025-11-05T02:01:00.123Z project-b
+      feature -> origin/main +3 -1 https://github.com/user/project-b.git
+```
+
+A dirty repository with uncommitted changes:
+```
+git ! 0f498c89b27a3c3d 2025-11-05T02:01:00.123Z project-c
+      main https://github.com/user/project-c.git
 ```
 
 **Special Git statuses and states**
 
-`fstate` recognizes two special Git repository cases to provide complete state visibility:
+1. **Repository error (`X` status)**
+   The `X` status indicates that a critical Git command has failed, signaling a corrupted or invalid repository. It is reported using the standard two-line format: the first line includes a deterministic bucket-style hash and timestamp, while the second, indented line contains the full error message from the failed command.
 
-1.  **Repository error (`X` status)**
-    The `X` status means a critical Git command (like `git status` or `git rev-parse`) failed in this directory. This usually indicates the directory is not a valid Git repository, is corrupted, or has insufficient permissions.
+   ```
+   git X d41d8cd98f00b204 2025-11-06T19:00:00.000Z corrupted-repo
+         fatal: not a git repository (or any of the parent directories): .git
+   ```
 
-    *   **Hash/timestamp:** Set to a deterministic bucket-style hash/timestamp if possible.
-    *   **Branch field:** Contains the full error message for diagnostics.
+2. **Empty repository (`!` status)**
+   A newly initialized repository (`git init`) with no commits is considered dirty (`!`). The second line will display the special indicator `[empty]`.
 
-2.  **Empty repository (`!` status with `<[empty]>` branch)**
-    A newly initialized repository (`git init`) with no commits yet shows a dirty status (`!`) because it is in an incomplete state, and **HEAD** does not exist.
-
-    *   **Hash/timestamp:** Calculated from any existing unstaged changes, or set to a bucket-style hash/timestamp if no files exist.
-    *   **Branch field:** Replaced with the special indicator `<[empty]>`.
-
+   ```
+   git ! f959f63745d10d4b 2025-11-06T11:42:44.837Z new-repo
+         [empty]
+   ```
 
 #### Directory Bucket Line (`dir`)
 
@@ -203,8 +222,6 @@ A directory is considered a “Bucket” if it contains at least one non-exclude
 dir   1b676f44a30e8c4f 2025-11-05T03:30:00.000Z documents/photos-2024
 dir B 8a2d4b9f6c1e0f3a 2025-11-04T11:20:00.000Z research/datasets/set1
 ```
-
----
 
 ### 🗃️ Bitrot & State File Management
 
