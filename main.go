@@ -1,4 +1,3 @@
-// main.go
 package main
 
 import (
@@ -52,6 +51,7 @@ type Config struct {
 	CreateState        bool
 	IgnoreBitrot       bool
 	CommonRoot         string
+	AllScanRoots       []string
 }
 
 // Entity represents an item on the filesystem to be processed (either a Git repo or a Bucket).
@@ -158,6 +158,18 @@ func main() {
 	if len(allPathsForRoot) == 0 {
 		allPathsForRoot = []string{"."}
 	}
+
+	// Store absolute paths of all scan roots for the exclude logic.
+	absRoots := make([]string, len(allPathsForRoot))
+	for i, p := range allPathsForRoot {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting absolute path for %s: %v\n", p, err)
+			os.Exit(1)
+		}
+		absRoots[i] = abs
+	}
+	cfg.AllScanRoots = absRoots
 
 	// 3. Calculate common root
 	var err error
@@ -303,7 +315,7 @@ func findEntities(cfg *Config) ([]Entity, error) {
 			if err != nil {
 				return err
 			}
-			if isExcluded(currentPath, cfg.CommonRoot, cfg.Excludes) {
+			if isExcluded(currentPath, cfg.CommonRoot, cfg.AllScanRoots, cfg.Excludes) {
 				if d.IsDir() {
 					return filepath.SkipDir
 				}
@@ -494,7 +506,7 @@ func (b *Bucket) Process(cfg *Config) error {
 			return filepath.SkipDir
 		}
 
-		if isExcluded(path, cfg.CommonRoot, cfg.Excludes) {
+		if isExcluded(path, cfg.CommonRoot, cfg.AllScanRoots, cfg.Excludes) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -1154,12 +1166,7 @@ func formatTimestamp(t time.Time) string {
 // It supports negative patterns (prefixed with '!') to re-include previously
 // excluded paths, similar to gitignore rules. The last pattern in the list
 // that matches the path determines whether it is excluded or included.
-func isExcluded(path, commonRoot string, patterns []string) bool {
-	relPath, err := filepath.Rel(commonRoot, path)
-	if err != nil {
-		relPath = path // Fallback
-	}
-
+func isExcluded(path string, commonRoot string, allScanRoots []string, patterns []string) bool {
 	// A path's exclusion status is determined by the last matching pattern.
 	// Default is to be included (not excluded).
 	excluded := false
@@ -1172,18 +1179,36 @@ func isExcluded(path, commonRoot string, patterns []string) bool {
 
 		matchFound := false
 		if strings.HasPrefix(pattern, "/") {
-			// Anchored pattern: matches against the full relative path
+			// Anchored pattern: matches against the path relative to one of the scan roots.
 			p := strings.TrimPrefix(pattern, "/")
-			if match, _ := filepath.Match(p, relPath); match {
-				// The special path "." should only be matched by an explicit "."
-				// pattern, not a wildcard pattern like ".*" that is intended
-				// for hidden files.
-				if relPath != "." || p == "." {
-					matchFound = true
+			for _, root := range allScanRoots {
+				// Path must be inside or be the same as the current scan root.
+				if path != root && !strings.HasPrefix(path, root+string(os.PathSeparator)) {
+					continue
+				}
+
+				relPath, err := filepath.Rel(root, path)
+				if err != nil {
+					continue // Should not happen if prefix check passed.
+				}
+
+				if match, _ := filepath.Match(p, relPath); match {
+					// The special path "." should only be matched by an explicit "."
+					// pattern, not a wildcard pattern like ".*" that is intended
+					// for hidden files.
+					if relPath != "." || p == "." {
+						matchFound = true
+						break // Matched against one root, no need to check others for this pattern.
+					}
 				}
 			}
 		} else {
 			// Component pattern: matches against any directory/file name component in the path
+			// relative to the common root of all scan paths.
+			relPath, err := filepath.Rel(commonRoot, path)
+			if err != nil {
+				relPath = path // Fallback in case of error
+			}
 			components := strings.Split(relPath, string(os.PathSeparator))
 			for _, component := range components {
 				// Similarly, the special component "." should only be matched
