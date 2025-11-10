@@ -52,12 +52,13 @@ type Config struct {
 	IgnoreBitrot       bool
 	CommonRoot         string
 	AllScanRoots       []string
+	AheadBehind        bool
 }
 
 // Entity represents an item on the filesystem to be processed (either a Git repo or a Bucket).
 type Entity interface {
 	Process(cfg *Config) error
-	Print(writer io.Writer, commonRoot string)
+	Print(writer io.Writer, commonRoot string, cfg *Config)
 	GetPath() string
 	GetChildren() []Entity
 	AddChild(child Entity)
@@ -125,6 +126,7 @@ func main() {
 	flag.BoolVar(&cfg.IgnoreBitrot, "ignorebitrot", false, "Disable bitrot detection")
 	flag.Var(&walkPaths, "walk", "Create and scan walk-only bucket (can be specified multiple times)")
 	flag.Var(&walkStatelessPaths, "statelesswalk", "Create a stateless walk-only bucket (can be specified multiple times)")
+	flag.BoolVar(&cfg.AheadBehind, "aheadbehind", false, "Display full ahead/behind git status")
 
 	flag.Parse()
 	cfg.InputPaths = addPaths
@@ -226,7 +228,7 @@ func processAndPrintRecursive(writer io.Writer, entity Entity, cfg *Config) erro
 	}
 
 	// Step 2: Print the result of the processed entity immediately
-	entity.Print(writer, cfg.CommonRoot)
+	entity.Print(writer, cfg.CommonRoot, cfg)
 
 	// Step 3: Sort children by path for deterministic processing and output
 	sort.Slice(entity.GetChildren(), func(i, j int) bool {
@@ -661,7 +663,7 @@ func (b *Bucket) Process(cfg *Config) error {
 	return nil
 }
 
-func (b *Bucket) Print(writer io.Writer, commonRoot string) {
+func (b *Bucket) Print(writer io.Writer, commonRoot string, cfg *Config) {
 	// Don't print if it resolved to not being a bucket (e.g., empty implicit dir)
 	if b.BucketHash == "" {
 		return
@@ -782,7 +784,7 @@ func (g *GitRepo) Process(cfg *Config) error {
 		g.Timestamp = time.Unix(commitTimeSec, 0)
 
 		if statusInfo.IsUnpushed {
-			g.Status = "="
+			g.Status = "+"
 		} else {
 			g.Status = " "
 		}
@@ -818,7 +820,7 @@ func (g *GitRepo) Process(cfg *Config) error {
 	return nil
 }
 
-func (g *GitRepo) Print(writer io.Writer, commonRoot string) {
+func (g *GitRepo) Print(writer io.Writer, commonRoot string, cfg *Config) {
 	relPath, err := filepath.Rel(commonRoot, g.Path)
 	if err != nil {
 		relPath = g.Path // Fallback
@@ -853,7 +855,18 @@ func (g *GitRepo) Print(writer io.Writer, commonRoot string) {
 
 	// Add ahead/behind info
 	if g.AheadBehind != "" {
-		branchInfoParts = append(branchInfoParts, g.AheadBehind)
+		parts := strings.Fields(g.AheadBehind)
+		if len(parts) == 2 {
+			if cfg.AheadBehind {
+				branchInfoParts = append(branchInfoParts, fmt.Sprintf("%s %s", parts[0], parts[1]))
+			} else {
+				aheadStr := parts[0]
+				ahead, err := strconv.Atoi(strings.TrimPrefix(aheadStr, "+"))
+				if err == nil && ahead > 0 {
+					branchInfoParts = append(branchInfoParts, aheadStr)
+				}
+			}
+		}
 	}
 
 	// Add upstream URL
