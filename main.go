@@ -129,7 +129,19 @@ func main() {
 	flag.Var(&walkStatelessPaths, "statelesswalk", "Create and scan a stateless walk-only bucket (can be used multiple times)")
 	flag.BoolVar(&cfg.AheadBehind, "aheadbehind", false, "Show detailed ahead/behind Git status information")
 
+	// Custom usage message
+	flag.Usage = func() {
+		fmt.Fprintln(flag.CommandLine.Output(), "Usage: fstate [flags] [paths...]")
+		fmt.Fprintln(flag.CommandLine.Output(), "If paths are provided without a flag, they are treated as --walk arguments.")
+		fmt.Fprintln(flag.CommandLine.Output())
+		flag.PrintDefaults()
+	}
+
 	flag.Parse()
+
+	// Append positional arguments to walkPaths
+	walkPaths = append(walkPaths, flag.Args()...)
+
 	cfg.InputPaths = addPaths
 	cfg.Excludes = excludes
 	cfg.WalkPaths = walkPaths
@@ -137,11 +149,6 @@ func main() {
 
 	if cfg.Readonly && cfg.CreateState {
 		fmt.Fprintln(os.Stderr, "Error: cannot use -nostate and -w flags at the same time.")
-		os.Exit(1)
-	}
-
-	if len(flag.Args()) > 0 {
-		fmt.Fprintln(os.Stderr, "Error: positional arguments are not supported. Use -add, -walk, or -walknostate to specify paths.")
 		os.Exit(1)
 	}
 
