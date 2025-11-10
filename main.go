@@ -124,7 +124,7 @@ func main() {
 	flag.BoolVar(&cfg.CreateState, "createstate", false, "Newly discovered buckets will have new .fstate files written; otherwise, only existing .fstate files will be updated")
 	flag.BoolVar(&cfg.IgnoreBitrot, "ignorebitrot", false, "Disable bitrot detection")
 	flag.Var(&walkPaths, "walk", "Create and scan walk-only bucket (can be specified multiple times)")
-	flag.Var(&walkStatelessPaths, "walkstateless", "Create a stateless walk-only bucket (can be specified multiple times)")
+	flag.Var(&walkStatelessPaths, "statelesswalk", "Create a stateless walk-only bucket (can be specified multiple times)")
 
 	flag.Parse()
 	cfg.InputPaths = addPaths
