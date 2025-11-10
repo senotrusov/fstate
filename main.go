@@ -119,15 +119,15 @@ func main() {
 	var walkPaths stringSliceFlag
 	var walkStatelessPaths stringSliceFlag
 
-	flag.StringVar(&cfg.OutputFile, "output", "", "Output file path (default: stdout)")
-	flag.Var(&addPaths, "add", "Add a path to be scanned as a bucket or git repository (can be specified multiple times)")
-	flag.Var(&excludes, "exclude", "Exclude pattern (can be specified multiple times)")
-	flag.BoolVar(&cfg.Readonly, "readonly", false, "Prevent writing/modifying .fstate files")
-	flag.BoolVar(&cfg.CreateState, "createstate", false, "Newly discovered buckets will have new .fstate files written; otherwise, only existing .fstate files will be updated")
-	flag.BoolVar(&cfg.IgnoreBitrot, "ignorebitrot", false, "Disable bitrot detection")
-	flag.Var(&walkPaths, "walk", "Create and scan walk-only bucket (can be specified multiple times)")
-	flag.Var(&walkStatelessPaths, "statelesswalk", "Create a stateless walk-only bucket (can be specified multiple times)")
-	flag.BoolVar(&cfg.AheadBehind, "aheadbehind", false, "Display full ahead/behind git status")
+	flag.StringVar(&cfg.OutputFile, "output", "", "Write the output to a file instead of standard output")
+	flag.Var(&addPaths, "add", "Add a path to scan as a bucket or Git repository (can be used multiple times)")
+	flag.Var(&excludes, "exclude", "Exclude files matching the given pattern (can be used multiple times)")
+	flag.BoolVar(&cfg.Readonly, "readonly", false, "Prevent modification or creation of any .fstate files")
+	flag.BoolVar(&cfg.CreateState, "createstate", false, "Write new .fstate files for newly discovered buckets; otherwise, update existing ones only")
+	flag.BoolVar(&cfg.IgnoreBitrot, "ignorebitrot", false, "Disable bitrot verification during scans")
+	flag.Var(&walkPaths, "walk", "Create and scan a walk-only bucket (can be used multiple times)")
+	flag.Var(&walkStatelessPaths, "statelesswalk", "Create and scan a stateless walk-only bucket (can be used multiple times)")
+	flag.BoolVar(&cfg.AheadBehind, "aheadbehind", false, "Show detailed ahead/behind Git status information")
 
 	flag.Parse()
 	cfg.InputPaths = addPaths
