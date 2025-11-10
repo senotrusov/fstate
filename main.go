@@ -43,15 +43,15 @@ func (s *stringSliceFlag) Set(value string) error {
 
 // Config stores the application's configuration from command-line arguments.
 type Config struct {
-	InputPaths       []string
-	WalkPaths        []string
-	WalkNostatePaths []string
-	OutputFile       string
-	Excludes         []string
-	NoFstateWrite    bool
-	WriteFstate      bool
-	IgnoreBitrot     bool
-	CommonRoot       string
+	InputPaths         []string
+	WalkPaths          []string
+	WalkStatelessPaths []string
+	OutputFile         string
+	Excludes           []string
+	Readonly           bool
+	CreateState        bool
+	IgnoreBitrot       bool
+	CommonRoot         string
 }
 
 // Entity represents an item on the filesystem to be processed (either a Git repo or a Bucket).
@@ -115,24 +115,24 @@ func main() {
 	var addPaths stringSliceFlag
 	var excludes stringSliceFlag
 	var walkPaths stringSliceFlag
-	var walkNostatePaths stringSliceFlag
+	var walkStatelessPaths stringSliceFlag
 
-	flag.StringVar(&cfg.OutputFile, "o", "", "Output file path (default: stdout)")
+	flag.StringVar(&cfg.OutputFile, "output", "", "Output file path (default: stdout)")
 	flag.Var(&addPaths, "add", "Add a path to be scanned as a bucket or git repository (can be specified multiple times)")
-	flag.Var(&excludes, "e", "Exclude pattern (can be specified multiple times)")
-	flag.BoolVar(&cfg.NoFstateWrite, "nostate", false, "Prevent writing/modifying .fstate files")
-	flag.BoolVar(&cfg.WriteFstate, "w", false, "Write .fstate files for all buckets (creates new, updates existing)")
-	flag.BoolVar(&cfg.IgnoreBitrot, "nobitrot", false, "Disable bitrot detection logic")
+	flag.Var(&excludes, "exclude", "Exclude pattern (can be specified multiple times)")
+	flag.BoolVar(&cfg.Readonly, "readonly", false, "Prevent writing/modifying .fstate files")
+	flag.BoolVar(&cfg.CreateState, "createstate", false, "Newly discovered buckets will have new .fstate files written; otherwise, only existing .fstate files will be updated")
+	flag.BoolVar(&cfg.IgnoreBitrot, "ignorebitrot", false, "Disable bitrot detection")
 	flag.Var(&walkPaths, "walk", "Create and scan walk-only bucket (can be specified multiple times)")
-	flag.Var(&walkNostatePaths, "walknostate", "Create a stateless walk-only bucket (can be specified multiple times)")
+	flag.Var(&walkStatelessPaths, "walkstateless", "Create a stateless walk-only bucket (can be specified multiple times)")
 
 	flag.Parse()
 	cfg.InputPaths = addPaths
 	cfg.Excludes = excludes
 	cfg.WalkPaths = walkPaths
-	cfg.WalkNostatePaths = walkNostatePaths
+	cfg.WalkStatelessPaths = walkStatelessPaths
 
-	if cfg.NoFstateWrite && cfg.WriteFstate {
+	if cfg.Readonly && cfg.CreateState {
 		fmt.Fprintln(os.Stderr, "Error: cannot use -nostate and -w flags at the same time.")
 		os.Exit(1)
 	}
@@ -143,16 +143,16 @@ func main() {
 	}
 
 	// 2. Determine input paths
-	isBareFstate := len(cfg.InputPaths) == 0 && len(cfg.WalkPaths) == 0 && len(cfg.WalkNostatePaths) == 0
+	isBareFstate := len(cfg.InputPaths) == 0 && len(cfg.WalkPaths) == 0 && len(cfg.WalkStatelessPaths) == 0
 	if isBareFstate {
 		// A bare 'fstate' call implies a stateless walk of the current directory.
-		cfg.WalkNostatePaths = []string{"."}
+		cfg.WalkStatelessPaths = []string{"."}
 	}
 
 	allPathsForRoot := []string{}
 	allPathsForRoot = append(allPathsForRoot, cfg.InputPaths...)
 	allPathsForRoot = append(allPathsForRoot, cfg.WalkPaths...)
-	allPathsForRoot = append(allPathsForRoot, cfg.WalkNostatePaths...)
+	allPathsForRoot = append(allPathsForRoot, cfg.WalkStatelessPaths...)
 
 	// If after all logic there are still no paths, default to current directory.
 	if len(allPathsForRoot) == 0 {
@@ -282,7 +282,7 @@ func findEntities(cfg *Config) ([]Entity, error) {
 	allScanRoots := []string{}
 	allScanRoots = append(allScanRoots, cfg.InputPaths...)
 	allScanRoots = append(allScanRoots, cfg.WalkPaths...)
-	allScanRoots = append(allScanRoots, cfg.WalkNostatePaths...)
+	allScanRoots = append(allScanRoots, cfg.WalkStatelessPaths...)
 
 	walkSet := make(map[string]struct{})
 	for _, p := range allScanRoots {
@@ -369,7 +369,7 @@ func findEntities(cfg *Config) ([]Entity, error) {
 			entityExists[absPath] = true
 		}
 	}
-	for _, path := range cfg.WalkNostatePaths {
+	for _, path := range cfg.WalkStatelessPaths {
 		absPath, _ := filepath.Abs(path)
 		if entityExists[absPath] {
 			continue
@@ -626,7 +626,7 @@ func (b *Bucket) Process(cfg *Config) error {
 			for _, fileRelPath := range bitrottenFiles {
 				fmt.Fprintf(os.Stderr, "bitrot warning: %s\n", filepath.Join(b.Path, fileRelPath))
 			}
-			if !cfg.NoFstateWrite {
+			if !cfg.Readonly {
 				bitrotFilePath := filepath.Join(b.Path, fstateBitrotFile)
 				if err := atomicWrite(bitrotFilePath, []byte(fstateString)); err != nil {
 					return fmt.Errorf("failed to write bitrot state file for %s: %w", b.Path, err)
@@ -636,11 +636,11 @@ func (b *Bucket) Process(cfg *Config) error {
 		}
 	}
 
-	if cfg.NoFstateWrite {
+	if cfg.Readonly {
 		return nil
 	}
 
-	if cfg.WriteFstate || hasFstate {
+	if cfg.CreateState || hasFstate {
 		if err := atomicWrite(existingFstatePath, []byte(fstateString)); err != nil {
 			return fmt.Errorf("failed to write state file for %s: %w", b.Path, err)
 		}
