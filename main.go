@@ -43,13 +43,15 @@ func (s *stringSliceFlag) Set(value string) error {
 
 // Config stores the application's configuration from command-line arguments.
 type Config struct {
-	InputPaths    []string
-	OutputFile    string
-	Excludes      []string
-	NoFstateWrite bool
-	WriteFstate   bool
-	IgnoreBitrot  bool
-	CommonRoot    string
+	InputPaths       []string
+	WalkPaths        []string
+	WalkNostatePaths []string
+	OutputFile       string
+	Excludes         []string
+	NoFstateWrite    bool
+	WriteFstate      bool
+	IgnoreBitrot     bool
+	CommonRoot       string
 }
 
 // Entity represents an item on the filesystem to be processed (either a Git repo or a Bucket).
@@ -70,12 +72,15 @@ type FileState struct {
 
 // Bucket represents a standard directory with files.
 type Bucket struct {
-	Path       string
-	BucketHash string
-	Timestamp  time.Time
-	Children   []Entity
-	files      []FileState
-	Status     string
+	Path        string
+	BucketHash  string
+	Timestamp   time.Time
+	Children    []Entity
+	files       []FileState
+	Status      string
+	IsWalkOnly  bool
+	IsStateless bool
+	IsExplicit  bool
 }
 
 // GitRepo represents a Git repository.
@@ -107,30 +112,56 @@ func (g *GitRepo) AddChild(child Entity) { g.Children = append(g.Children, child
 func main() {
 	// 1. Configure and parse flags
 	cfg := &Config{}
+	var addPaths stringSliceFlag
 	var excludes stringSliceFlag
+	var walkPaths stringSliceFlag
+	var walkNostatePaths stringSliceFlag
+
 	flag.StringVar(&cfg.OutputFile, "o", "", "Output file path (default: stdout)")
+	flag.Var(&addPaths, "add", "Add a path to be scanned as a bucket or git repository (can be specified multiple times)")
 	flag.Var(&excludes, "e", "Exclude pattern (can be specified multiple times)")
 	flag.BoolVar(&cfg.NoFstateWrite, "nostate", false, "Prevent writing/modifying .fstate files")
 	flag.BoolVar(&cfg.WriteFstate, "w", false, "Write .fstate files for all buckets (creates new, updates existing)")
 	flag.BoolVar(&cfg.IgnoreBitrot, "nobitrot", false, "Disable bitrot detection logic")
+	flag.Var(&walkPaths, "walk", "Create and scan walk-only bucket (can be specified multiple times)")
+	flag.Var(&walkNostatePaths, "walknostate", "Create a stateless walk-only bucket (can be specified multiple times)")
 
 	flag.Parse()
+	cfg.InputPaths = addPaths
 	cfg.Excludes = excludes
+	cfg.WalkPaths = walkPaths
+	cfg.WalkNostatePaths = walkNostatePaths
 
 	if cfg.NoFstateWrite && cfg.WriteFstate {
 		fmt.Fprintln(os.Stderr, "Error: cannot use -nostate and -w flags at the same time.")
 		os.Exit(1)
 	}
 
+	if len(flag.Args()) > 0 {
+		fmt.Fprintln(os.Stderr, "Error: positional arguments are not supported. Use -add, -walk, or -walknostate to specify paths.")
+		os.Exit(1)
+	}
+
 	// 2. Determine input paths
-	cfg.InputPaths = flag.Args()
-	if len(cfg.InputPaths) == 0 {
-		cfg.InputPaths = []string{"."}
+	isBareFstate := len(cfg.InputPaths) == 0 && len(cfg.WalkPaths) == 0 && len(cfg.WalkNostatePaths) == 0
+	if isBareFstate {
+		// A bare 'fstate' call implies a stateless walk of the current directory.
+		cfg.WalkNostatePaths = []string{"."}
+	}
+
+	allPathsForRoot := []string{}
+	allPathsForRoot = append(allPathsForRoot, cfg.InputPaths...)
+	allPathsForRoot = append(allPathsForRoot, cfg.WalkPaths...)
+	allPathsForRoot = append(allPathsForRoot, cfg.WalkNostatePaths...)
+
+	// If after all logic there are still no paths, default to current directory.
+	if len(allPathsForRoot) == 0 {
+		allPathsForRoot = []string{"."}
 	}
 
 	// 3. Calculate common root
 	var err error
-	cfg.CommonRoot, err = getCommonRoot(cfg.InputPaths)
+	cfg.CommonRoot, err = getCommonRoot(allPathsForRoot)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error calculating common root: %v\n", err)
 		os.Exit(1)
@@ -244,16 +275,31 @@ func getCommonRoot(paths []string) (string, error) {
 // findEntities walks the input paths to discover all explicit and implicit entities in a single pass.
 func findEntities(cfg *Config) ([]Entity, error) {
 	var gitRepos []string
-	var explicitBuckets []string
+	var fstateBuckets []string
 	dirsWithFiles := make(map[string]bool)
 
-	// Step 1: Walk the entire file tree once to gather all facts.
-	for _, path := range cfg.InputPaths {
-		absPath, err := filepath.Abs(path)
+	// Step 1: Walk all argument paths to gather facts about the filesystem.
+	allScanRoots := []string{}
+	allScanRoots = append(allScanRoots, cfg.InputPaths...)
+	allScanRoots = append(allScanRoots, cfg.WalkPaths...)
+	allScanRoots = append(allScanRoots, cfg.WalkNostatePaths...)
+
+	walkSet := make(map[string]struct{})
+	for _, p := range allScanRoots {
+		abs, err := filepath.Abs(p)
 		if err != nil {
 			return nil, err
 		}
-		err = filepath.WalkDir(absPath, func(currentPath string, d fs.DirEntry, err error) error {
+		walkSet[abs] = struct{}{}
+	}
+
+	for path := range walkSet {
+		// Only walk directories that exist
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		err = filepath.WalkDir(path, func(currentPath string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -267,13 +313,12 @@ func findEntities(cfg *Config) ([]Entity, error) {
 			if d.IsDir() {
 				if hasDirEntry(currentPath, gitDir) {
 					gitRepos = append(gitRepos, currentPath)
-					return filepath.SkipDir // Git repos are terminal; don't look inside.
+					return filepath.SkipDir // Git repos are terminal.
 				}
 				if hasDirEntry(currentPath, fstateFile) {
-					explicitBuckets = append(explicitBuckets, currentPath)
+					fstateBuckets = append(fstateBuckets, currentPath)
 				}
 			} else {
-				// It's a file, so its parent is a candidate for an implicit bucket.
 				dirsWithFiles[filepath.Dir(currentPath)] = true
 			}
 			return nil
@@ -283,30 +328,64 @@ func findEntities(cfg *Config) ([]Entity, error) {
 		}
 	}
 
-	// Step 2: Build the initial entity list and a map of "claimed" space.
+	// Step 2: Build the entity list.
 	var finalEntities []Entity
+	// claimedPaths tracks space consumed by "hard" buckets.
 	claimedPaths := make(map[string]bool)
+	// entityExists prevents creating two entities for the same path.
+	entityExists := make(map[string]bool)
 
+	// Git repos always claim their space.
 	for _, path := range gitRepos {
+		if entityExists[path] {
+			continue
+		}
 		finalEntities = append(finalEntities, &GitRepo{Path: path})
 		claimedPaths[path] = true
-	}
-	for _, path := range explicitBuckets {
-		finalEntities = append(finalEntities, &Bucket{Path: path})
-		claimedPaths[path] = true
+		entityExists[path] = true
 	}
 
-	// Step 3: Find the highest-level implicit buckets.
-	// Sort candidate paths to process parents before children.
-	var candidatePaths []string
-	for path := range dirsWithFiles {
-		candidatePaths = append(candidatePaths, path)
+	// "Hard" buckets from -add flag claim their space.
+	for _, path := range cfg.InputPaths {
+		absPath, _ := filepath.Abs(path)
+		if entityExists[absPath] {
+			continue
+		}
+		if info, err := os.Stat(absPath); err == nil && info.IsDir() {
+			finalEntities = append(finalEntities, &Bucket{Path: absPath, IsExplicit: true})
+			claimedPaths[absPath] = true
+			entityExists[absPath] = true
+		}
 	}
-	sort.Strings(candidatePaths)
 
-	for _, path := range candidatePaths {
+	// Walk-only buckets are added as entities but DO NOT claim space.
+	for _, path := range cfg.WalkPaths {
+		absPath, _ := filepath.Abs(path)
+		if entityExists[absPath] {
+			continue
+		}
+		if info, err := os.Stat(absPath); err == nil && info.IsDir() {
+			finalEntities = append(finalEntities, &Bucket{Path: absPath, IsWalkOnly: true, IsExplicit: true})
+			entityExists[absPath] = true
+		}
+	}
+	for _, path := range cfg.WalkNostatePaths {
+		absPath, _ := filepath.Abs(path)
+		if entityExists[absPath] {
+			continue
+		}
+		if info, err := os.Stat(absPath); err == nil && info.IsDir() {
+			finalEntities = append(finalEntities, &Bucket{Path: absPath, IsWalkOnly: true, IsStateless: true, IsExplicit: true})
+			entityExists[absPath] = true
+		}
+	}
+
+	// Buckets with .fstate files claim space, if not already claimed or defined.
+	for _, path := range fstateBuckets {
+		if entityExists[path] {
+			continue
+		}
 		isClaimed := false
-		// Check if this path or any of its parents are already claimed.
 		tempPath := path
 		for {
 			if claimedPaths[tempPath] {
@@ -319,21 +398,63 @@ func findEntities(cfg *Config) ([]Entity, error) {
 			}
 			tempPath = parent
 		}
-
 		if !isClaimed {
 			finalEntities = append(finalEntities, &Bucket{Path: path})
-			claimedPaths[path] = true // This new bucket now claims its space.
+			claimedPaths[path] = true
+			entityExists[path] = true
 		}
 	}
 
-	// Step 4: Build the parent-child relationships for the final list.
+	// Implicit buckets from dirs with files can only form in unclaimed space.
+	var candidatePaths []string
+	for path := range dirsWithFiles {
+		candidatePaths = append(candidatePaths, path)
+	}
+	sort.Strings(candidatePaths)
+
+	for _, path := range candidatePaths {
+		if entityExists[path] {
+			continue
+		}
+		isClaimed := false
+		tempPath := path
+		for {
+			if claimedPaths[tempPath] {
+				isClaimed = true
+				break
+			}
+			parent := filepath.Dir(tempPath)
+			if parent == tempPath {
+				break
+			}
+			tempPath = parent
+		}
+		if !isClaimed {
+			finalEntities = append(finalEntities, &Bucket{Path: path})
+			claimedPaths[path] = true
+			entityExists[path] = true
+		}
+	}
+
+	// Step 3: Build the parent-child relationships for the final list.
 	sort.Slice(finalEntities, func(i, j int) bool {
 		return len(finalEntities[i].GetPath()) < len(finalEntities[j].GetPath())
 	})
 
 	var rootEntities []Entity
-	for _, entity := range finalEntities {
-		parent := findParentEntity(rootEntities, entity.GetPath())
+	for i, entity := range finalEntities {
+		var parent Entity
+		// Look for a parent in the entities processed so far.
+		for j := 0; j < i; j++ {
+			potentialParent := finalEntities[j]
+			if strings.HasPrefix(entity.GetPath(), potentialParent.GetPath()+string(os.PathSeparator)) {
+				// The best parent is the longest one found so far.
+				if parent == nil || len(potentialParent.GetPath()) > len(parent.GetPath()) {
+					parent = potentialParent
+				}
+			}
+		}
+
 		if parent != nil {
 			parent.AddChild(entity)
 		} else {
@@ -378,6 +499,15 @@ func (b *Bucket) Process(cfg *Config) error {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+
+		// For walk-only buckets, don't descend into subdirectories for file gathering.
+		// Any subdirectory that is not a known child entity will be skipped.
+		if d.IsDir() {
+			if b.IsWalkOnly {
+				return filepath.SkipDir
+			}
+			return nil // For normal buckets, continue walk.
 		}
 
 		// We only care about normal files. Ignore symlinks, dirs, pipes, etc.
@@ -433,35 +563,46 @@ func (b *Bucket) Process(cfg *Config) error {
 
 	hasFstate := hasDirEntry(b.Path, fstateFile)
 
-	// A directory is only a bucket if it contains files or an explicit .fstate file.
-	if !fileFound && !hasFstate {
-		b.BucketHash = "" // Mark as non-bucket to be skipped during printing.
+	// --- Suppression Logic ---
+	// Decide upfront if this bucket should be materialized in the output.
+
+	// Rule 1: A stateless walk-only bucket is ONLY materialized if it already has state.
+	// The presence of top-level files is irrelevant for this decision.
+	if b.IsStateless && !hasFstate {
+		b.BucketHash = "" // Suppress printing.
+		return nil        // Skip all hash, bitrot, and write logic.
+	}
+
+	// Rule 2: An empty walk-only bucket (that is not stateless) is not materialized.
+	if b.IsWalkOnly && !fileFound && !hasFstate {
+		b.BucketHash = "" // Suppress printing.
 		return nil
 	}
 
-	// Handle mtime and hash calculation based on whether files were found.
+	// Rule 3: An implicit bucket is only materialized if it has files or state.
+	if !b.IsExplicit && !fileFound && !hasFstate {
+		b.BucketHash = ""
+		return nil
+	}
+
+	// --- Materialization Logic ---
+	// If we passed the suppression checks, proceed to calculate hash and handle state.
 	var fstateString string
 	if !fileFound {
-		// Case: No regular files, but .fstate exists.
-		// Obtain mtime from the bucket folder itself.
+		// Case: No regular files, but .fstate exists or it's an explicit empty bucket.
 		info, err := os.Stat(b.Path)
 		if err != nil {
 			return fmt.Errorf("could not stat bucket directory %s for mtime: %w", b.Path, err)
 		}
 		b.Timestamp = info.ModTime()
-
-		// Bucket hash is from an empty buffer.
 		b.BucketHash = fmt.Sprintf("%016x", xxh3.HashString(""))
-		fstateString = "" // No files, so content is empty.
+		fstateString = ""
 	} else {
 		// Case: Regular files were found.
 		b.Timestamp = latestModTime
-
-		// Sort files by path for deterministic .fstate content and hash.
 		sort.Slice(files, func(i, j int) bool {
 			return files[i].Path < files[j].Path
 		})
-
 		var fstateContent strings.Builder
 		for _, f := range files {
 			fmt.Fprintf(&fstateContent, "%s %s %s\n", f.Hash, formatTimestamp(f.Timestamp), f.Path)
@@ -472,27 +613,21 @@ func (b *Bucket) Process(cfg *Config) error {
 	b.files = files
 
 	// --- Bitrot detection and .fstate writing logic ---
-
 	existingFstatePath := filepath.Join(b.Path, fstateFile)
 
-	// Step 1: Always check for bitrot if .fstate exists and bitrot detection is enabled.
 	if hasFstate && !cfg.IgnoreBitrot {
 		bitrottenFiles, err := checkBitrot(existingFstatePath, b.files)
 		if err != nil {
-			// An error here should also be fatal.
 			return fmt.Errorf("failed to check for bitrot in %s: %w", existingFstatePath, err)
 		}
 
 		if len(bitrottenFiles) > 0 {
 			b.Status = "B"
 			for _, fileRelPath := range bitrottenFiles {
-				fullPath := filepath.Join(b.Path, fileRelPath)
-				fmt.Fprintf(os.Stderr, "bitrot warning: %s\n", fullPath)
+				fmt.Fprintf(os.Stderr, "bitrot warning: %s\n", filepath.Join(b.Path, fileRelPath))
 			}
-
 			if !cfg.NoFstateWrite {
 				bitrotFilePath := filepath.Join(b.Path, fstateBitrotFile)
-				// Writing the new state is a critical operation.
 				if err := atomicWrite(bitrotFilePath, []byte(fstateString)); err != nil {
 					return fmt.Errorf("failed to write bitrot state file for %s: %w", b.Path, err)
 				}
@@ -501,12 +636,10 @@ func (b *Bucket) Process(cfg *Config) error {
 		}
 	}
 
-	// Step 2: If no bitrot, proceed with normal write logic.
 	if cfg.NoFstateWrite {
 		return nil
 	}
 
-	// Write if -w is specified, OR if a .fstate file already exists.
 	if cfg.WriteFstate || hasFstate {
 		if err := atomicWrite(existingFstatePath, []byte(fstateString)); err != nil {
 			return fmt.Errorf("failed to write state file for %s: %w", b.Path, err)
@@ -517,7 +650,7 @@ func (b *Bucket) Process(cfg *Config) error {
 }
 
 func (b *Bucket) Print(writer io.Writer, commonRoot string) {
-	// Don't print if it resolved to not being a bucket (e.g., empty dir)
+	// Don't print if it resolved to not being a bucket (e.g., empty implicit dir)
 	if b.BucketHash == "" {
 		return
 	}
@@ -1101,40 +1234,4 @@ func atomicWrite(filename string, data []byte) error {
 		return err
 	}
 	return os.Rename(tempFile.Name(), filename)
-}
-
-// findParentEntity traverses the entity tree to find the direct parent of a given path.
-func findParentEntity(roots []Entity, path string) Entity {
-	var bestMatch Entity
-	for _, root := range roots {
-		p := findParentRecursive(root, path)
-		if p != nil {
-			if bestMatch == nil || len(p.GetPath()) > len(bestMatch.GetPath()) {
-				bestMatch = p
-			}
-		}
-	}
-	return bestMatch
-}
-
-func findParentRecursive(current Entity, path string) Entity {
-	// Check if 'current' is a direct or indirect parent of 'path'
-	if strings.HasPrefix(path, current.GetPath()+string(os.PathSeparator)) {
-		// It's a potential parent. Check if any of its children are a better (more specific) parent.
-		var bestChildMatch Entity
-		for _, child := range current.GetChildren() {
-			p := findParentRecursive(child, path)
-			if p != nil {
-				// This should always be a more specific path if it's a match
-				bestChildMatch = p
-				break
-			}
-		}
-		if bestChildMatch != nil {
-			return bestChildMatch
-		}
-		// No child is a more specific parent, so 'current' is the direct parent.
-		return current
-	}
-	return nil
 }
