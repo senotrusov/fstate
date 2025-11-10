@@ -145,8 +145,8 @@ func main() {
 	// 2. Determine input paths
 	isBareFstate := len(cfg.InputPaths) == 0 && len(cfg.WalkPaths) == 0 && len(cfg.WalkStatelessPaths) == 0
 	if isBareFstate {
-		// A bare 'fstate' call implies a stateless walk of the current directory.
-		cfg.WalkStatelessPaths = []string{"."}
+		// A bare 'fstate' call implies a walk of the current directory.
+		cfg.WalkPaths = []string{"."}
 	}
 
 	allPathsForRoot := []string{}
