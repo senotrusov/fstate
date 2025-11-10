@@ -4,9 +4,9 @@
 
 If you use multiple computers, like a laptop, desktop, or virtual machine, it can be tricky to keep everything in sync. By comparing (`diff`-ing) fstate summaries between computers, you can instantly see:
 
-* Which projects or folders exist on one machine but not another
-* Which Git repositories have uncommitted or unpushed changes
-* Which unversioned data folders (for example, photos, research data, archives) have changed, gone out of sync, or even suffered bit rot
+*   Which projects or folders exist on one machine but not another
+*   Which Git repositories have uncommitted or unpushed changes
+*   Which unversioned data folders (for example, photos, research data, archives) have changed, gone out of sync, or even suffered bit rot
 
 With this visibility, you can immediately determine which computer holds the most current files. From there, you can perform standard Git operations to commit and push/pull changes, and for unversioned data, perform a fast, predictable one-way sync (for example, using `rsync`). You can also copy projects across machines if you notice that one computer has them while another does not.
 
@@ -48,15 +48,16 @@ go build
 
 ### 💡 Usage
 
-The simplest way to run `fstate` is to scan the current directory:
+Running `fstate` without any arguments is equivalent to scanning the current directory (`fstate .`). Paths provided as positional arguments are treated as `--walk` paths.
 
 ```bash
+# Scan the current directory
 fstate
-```
 
-Alternatively, you can scan your home folder while ignoring all dotfiles except `.password-store`:
+# Scan a specific project and a data folder
+fstate ~/code/my-project ~/data/photos
 
-```bash
+# Scan your home folder while ignoring all dotfiles except .password-store
 fstate -e '/.*' -e '!/.password-store' ~
 ```
 
@@ -64,11 +65,15 @@ fstate -e '/.*' -e '!/.password-store' ~
 
 | Flag | Description |
 | :--- | :--- |
-| `-o <file>` | Write output to the specified file path (default: stdout). |
-| `-e <pattern>` | Exclude pattern (can be specified multiple times). |
-| `-w` | Write `.fstate` files. Creates `.fstate` for new buckets and updates existing ones. |
-| `-nostate` | Do not write or modify any `.fstate` files. Overrides default behavior of updating existing files. Cannot be used with `-w`. |
-| `-nobitrot` | Disable the bitrot detection logic. |
+| `-a, --add <path>` | Add a path to scan as a bucket or Git repository (can be used multiple times). |
+| `-b, --ignorebitrot` | Disable bitrot verification during scans. |
+| `-c, --createstate` | Create new `.fstate` files for newly discovered buckets. By default, only existing `.fstate` files are updated. |
+| `-d, --aheadbehind` | Show detailed ahead/behind Git status information (e.g., `+1 -2`). By default, only the ahead count is shown. |
+| `-e, --exclude <pattern>` | Exclude files matching the given pattern (can be used multiple times). |
+| `-o, --output <file>` | Write the output to a file instead of standard output. |
+| `-r, --readonly` | Treat `.fstate` files as read-only, preventing any modification or creation. |
+| `-s, --statelesswalk <path>` | Create and scan a stateless walk-only bucket (can be used multiple times). |
+| `-w, --walk <path>` | Create and scan a walk-only bucket (can be used multiple times). |
 
 #### Examples
 
@@ -78,11 +83,11 @@ When you specify multiple paths, `fstate` automatically calculates the **common 
 
 ```bash
 # On Machine A (where projects are in /home/user/code/)
-fstate ~/code/app1 ~/code/app2 ~/data/archive
+fstate --add ~/code/app1 --add ~/code/app2 ~/data/archive
 # Common root will be '/home/user'.
 
 # On Machine B (where projects are in /mnt/work/code/)
-fstate /mnt/work/code/app1 /mnt/work/code/app2 /mnt/work/archive
+fstate --add /mnt/work/code/app1 --add /mnt/work/code/app2 /mnt/work/archive
 # Common root will be '/mnt/work'.
 # The relative paths in the output will match Machine A's output.
 ```
@@ -147,10 +152,10 @@ Generated for any directory containing a `.git` folder. The state of a Git repos
 
 **First Line: Core State**
 
-| Field | Description | Clean (`<space>` / `=`) | Dirty (`!`) | Error (`X`) |
+| Field | Description | Clean (`<space>` / `+`) | Dirty (`!`) | Error (`X`) |
 | :--- | :--- | :--- | :--- | :--- |
 | **`git`** | Entity type indicator. | | | |
-| **`<STATUS>`** | **Status.** | `<space>`(Up-to-Date with Upstream), `=` (Ahead of Upstream) | `!` (Uncommitted changes) | `X` (Error) |
+| **`<STATUS>`** | **Status.** | `<space>`(Up-to-Date with Upstream), `+` (Ahead of Upstream) | `!` (Uncommitted changes) | `X` (Error) |
 | **`<HASH>`** | **Summary Hash.** | First 16 chars of the HEAD commit SHA-1. | A 16-character XXH3 hash derived from all changed file contents and paths (staged, unstaged, untracked, and deleted). | A hash of the directory contents. |
 | **`<TIMESTAMP>`** | **Modification Time.** | Commit time of HEAD. | The most recent mtime among all changed files. | The most recent mtime of any file. |
 | **`<PATH>`** | Path relative to the **Common Root**. | | | |
@@ -163,21 +168,21 @@ The second line is indented and its components are space-separated.
 | :--- | :--- | :--- |
 | **`<LOCAL_BRANCH>`** | The short name of the current local branch. | `main` |
 | `-> <UPSTREAM_BRANCH>` | *(Optional)* Appears if the local branch name is different from its remote tracking branch. `<UPSTREAM_BRANCH>` is the full name of the remote branch. | `dev -> origin/main` |
-| **`<AHEAD/BEHIND>`** | Commit counts ahead (`+A`) and behind (`-B`) the upstream branch. | `+1 -0` |
-| **`<UPSTREAM_URL>`** | The URL of the `origin` or upstream remote. | `https://github.com/user/repo.git` |
+| **`<AHEAD/BEHIND>`** | By default, only commits ahead (`+A`) are shown. With `--aheadbehind`, both ahead (`+A`) and behind (`-B`) counts are displayed. | `+1` or `+3 -1` |
+| **`<UPSTREAM_URL>`** | The URL of the upstream remote. | `https://github.com/user/repo.git` |
 
 **Example Git Outputs:**
 
 A repository that is clean and has one commit to push:
 ```
-git = fc11021421e20e19 2025-05-09T11:09:12.000Z project-a
-      main +1 -0 https://github.com/user/project-a.git
+git + fc11021421e20e19 2025-05-09T11:09:12.000Z project-a
+      main +1 https://github.com/user/project-a.git
 ```
 
 A repository where the local branch `feature` tracks a different remote branch `origin/main`:
 ```
-git = ab118c89b27a3c3d 2025-11-05T02:01:00.123Z project-b
-      feature -> origin/main +3 -1 https://github.com/user/project-b.git
+git + ab118c89b27a3c3d 2025-11-05T02:01:00.123Z project-b
+      feature -> origin/main +3 https://github.com/user/project-b.git
 ```
 
 A dirty repository with uncommitted changes:
@@ -188,21 +193,21 @@ git ! 0f498c89b27a3c3d 2025-11-05T02:01:00.123Z project-c
 
 **Special Git statuses and states**
 
-1. **Repository error (`X` status)**
-   The `X` status indicates that a critical Git command has failed, signaling a corrupted or invalid repository. It is reported using the standard two-line format: the first line includes a deterministic bucket-style hash and timestamp, while the second, indented line contains the full error message from the failed command.
+1.  **Repository error (`X` status)**
+    The `X` status indicates that a critical Git command has failed, signaling a corrupted or invalid repository. It is reported using the standard two-line format: the first line includes a deterministic bucket-style hash and timestamp, while the second, indented line contains the full error message from the failed command.
 
-   ```
-   git X d41d8cd98f00b204 2025-11-06T19:00:00.000Z corrupted-repo
-         fatal: not a git repository (or any of the parent directories): .git
-   ```
+    ```
+    git X d41d8cd98f00b204 2025-11-06T19:00:00.000Z corrupted-repo
+          git status -> exit status 128: fatal: not a git repository (or any of the parent directories): .git
+    ```
 
-2. **Empty repository (`!` status)**
-   A newly initialized repository (`git init`) with no commits is considered dirty (`!`). The second line will display the special indicator `[empty]`.
+2.  **Empty repository (`!` status)**
+    A newly initialized repository (`git init`) with no commits is considered dirty (`!`). The second line will display the special indicator `[empty]`.
 
-   ```
-   git ! f959f63745d10d4b 2025-11-06T11:42:44.837Z new-repo
-         [empty]
-   ```
+    ```
+    git ! f959f63745d10d4b 2025-11-06T11:42:44.837Z new-repo
+          [empty]
+    ```
 
 #### Directory Bucket Line (`dir`)
 
@@ -225,14 +230,14 @@ dir B 8a2d4b9f6c1e0f3a 2025-11-04T11:20:00.000Z research/datasets/set1
 
 ### 🗃️ Bitrot & State File Management
 
-By default, `fstate` runs in a "read-only" mode for new directories. It will scan all directories and report their state, but will only *update* existing `.fstate` files. It will **not** create new `.fstate` files unless explicitly told to.
+`fstate` provides granular control over when and how state files (`.fstate`) are written to disk.
 
 | Flag / State | Behavior |
 | :--- | :--- |
 | **(Default)** | Scans all directories. **Updates** `.fstate` files if they already exist. Does **not create** new ones. |
-| **`-w`** | **Enables writing.** Creates new `.fstate` files for buckets that don't have one, and updates existing ones. |
-| **`-nostate`** | **Disables all writing.** Prevents both creation and updates of any `.fstate` or `.fstate-after-bitrot` files. Cannot be used with `-w`. |
-| **`-nobitrot`** | When writing is enabled (either by default or with `-w`), this flag disables the bitrot check and unconditionally overwrites `.fstate` with the new state. |
+| **`-c, --createstate`** | **Enables writing for new buckets.** Creates new `.fstate` files for buckets that don't have one, and updates existing ones. |
+| **`-r, --readonly`** | **Disables all writing.** Prevents both creation and updates of any `.fstate` or `.fstate-after-bitrot` files. Cannot be used with `-c`. |
+| **`-b, --ignorebitrot`** | When writing is enabled, this flag disables the bitrot check and unconditionally overwrites `.fstate` with the new state. |
 
 **Bitrot Detection**
 

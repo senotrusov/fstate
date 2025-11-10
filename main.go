@@ -111,41 +111,89 @@ func (g *GitRepo) AddChild(child Entity) { g.Children = append(g.Children, child
 
 // --- Main Program Logic ---
 
-func main() {
-	// 1. Configure and parse flags
-	cfg := &Config{}
-	var addPaths stringSliceFlag
-	var excludes stringSliceFlag
-	var walkPaths stringSliceFlag
-	var walkStatelessPaths stringSliceFlag
+// flagDefinition centralizes the definition of a command-line flag.
+type flagDefinition struct {
+	name      string      // long name, e.g., "add"
+	shortName string      // short name, e.g., "a"
+	argName   string      // name for the flag's argument in the usage output, e.g., "<path>"
+	usage     string      // help text
+	valuePtr  interface{} // pointer to the variable that holds the flag's value
+}
 
-	flag.StringVar(&cfg.OutputFile, "output", "", "Write the output to a file instead of standard output")
-	flag.Var(&addPaths, "add", "Add a path to scan as a bucket or Git repository (can be used multiple times)")
-	flag.Var(&excludes, "exclude", "Exclude files matching the given pattern (can be used multiple times)")
-	flag.BoolVar(&cfg.Readonly, "readonly", false, "Prevent modification or creation of any .fstate files")
-	flag.BoolVar(&cfg.CreateState, "createstate", false, "Write new .fstate files for newly discovered buckets; otherwise, update existing ones only")
-	flag.BoolVar(&cfg.IgnoreBitrot, "ignorebitrot", false, "Disable bitrot verification during scans")
-	flag.Var(&walkPaths, "walk", "Create and scan a walk-only bucket (can be used multiple times)")
-	flag.Var(&walkStatelessPaths, "statelesswalk", "Create and scan a stateless walk-only bucket (can be used multiple times)")
-	flag.BoolVar(&cfg.AheadBehind, "aheadbehind", false, "Show detailed ahead/behind Git status information")
+// setupAndParseFlags configures the command-line flags, sets a custom usage message,
+// and parses the flags. It centralizes flag definition to avoid repetition.
+func setupAndParseFlags(cfg *Config) {
+	var addPaths, excludes, walkPaths, walkStatelessPaths stringSliceFlag
 
-	// Custom usage message
+	// Centralized flag definitions provide a single source of truth.
+	flagDefs := []flagDefinition{
+		{"add", "a", "path", "Add a path to scan as a bucket or Git repository (can be used multiple times).", &addPaths},
+		{"aheadbehind", "d", "", "Show detailed ahead/behind Git status information.", &cfg.AheadBehind},
+		{"createstate", "c", "", "Create new .fstate files for newly discovered buckets; otherwise update only the existing ones.", &cfg.CreateState},
+		{"exclude", "e", "pattern", "Exclude files matching the given pattern (can be used multiple times).", &excludes},
+		{"ignorebitrot", "b", "", "Disable bitrot verification during scans.", &cfg.IgnoreBitrot},
+		{"output", "o", "file", "Write the output to a file instead of standard output.", &cfg.OutputFile},
+		{"readonly", "r", "", "Treat .fstate files as read-only, preventing modification or creation.", &cfg.Readonly},
+		{"statelesswalk", "s", "path", "Create and scan a stateless walk-only bucket (can be used multiple times).", &walkStatelessPaths},
+		{"walk", "w", "path", "Create and scan a walk-only bucket (can be used multiple times).", &walkPaths},
+	}
+
+	// Sort definitions by short name for a consistent, predictable help message.
+	sort.Slice(flagDefs, func(i, j int) bool {
+		return flagDefs[i].shortName < flagDefs[j].shortName
+	})
+
+	// Register all flags from the centralized definitions.
+	for _, def := range flagDefs {
+		// The flag package requires passing the usage string for each alias.
+		definitiveUsage := def.usage
+		switch v := def.valuePtr.(type) {
+		case *string:
+			flag.StringVar(v, def.name, "", definitiveUsage)
+			flag.StringVar(v, def.shortName, "", definitiveUsage)
+		case *bool:
+			flag.BoolVar(v, def.name, false, definitiveUsage)
+			flag.BoolVar(v, def.shortName, false, definitiveUsage)
+		case flag.Value: // Handles our custom stringSliceFlag
+			flag.Var(v, def.name, definitiveUsage)
+			flag.Var(v, def.shortName, definitiveUsage)
+		default:
+			// This indicates a programming error.
+			panic(fmt.Sprintf("unsupported flag type for %s", def.name))
+		}
+	}
+
+	// Define a much simpler, data-driven custom usage message.
 	flag.Usage = func() {
 		fmt.Fprintln(flag.CommandLine.Output(), "Usage: fstate [flags] [paths...]")
 		fmt.Fprintln(flag.CommandLine.Output(), "If paths are provided without a flag, they are treated as --walk arguments.")
 		fmt.Fprintln(flag.CommandLine.Output())
-		flag.PrintDefaults()
+		fmt.Fprintln(flag.CommandLine.Output(), "Flags:")
+
+		for _, def := range flagDefs {
+			// Format names like "-a, --add <path>"
+			names := fmt.Sprintf("-%s, --%s", def.shortName, def.name)
+			if def.argName != "" {
+				names = fmt.Sprintf("%s <%s>", names, def.argName)
+			}
+			// Adjust padding to accommodate the longest flag string with its argument name
+			fmt.Fprintf(flag.CommandLine.Output(), "  %-27s %s\n", names, def.usage)
+		}
 	}
 
 	flag.Parse()
 
-	// Append positional arguments to walkPaths
-	walkPaths = append(walkPaths, flag.Args()...)
-
+	// Post-parsing assignments from the temporary slice flags to the config struct.
 	cfg.InputPaths = addPaths
 	cfg.Excludes = excludes
-	cfg.WalkPaths = walkPaths
+	cfg.WalkPaths = append(walkPaths, flag.Args()...) // Append positional args
 	cfg.WalkStatelessPaths = walkStatelessPaths
+}
+
+func main() {
+	// 1. Configure and parse flags using the new refactored function.
+	cfg := &Config{}
+	setupAndParseFlags(cfg)
 
 	if cfg.Readonly && cfg.CreateState {
 		fmt.Fprintln(os.Stderr, "Error: cannot use -nostate and -w flags at the same time.")
