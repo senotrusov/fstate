@@ -116,7 +116,7 @@ Patterns can be specified multiple times. Matching is performed using Go’s `fi
     fstate -e 'node_modules' -e '*.log' .
     ```
 
-*   **Anchored Pattern:** To match only at the root of the scan (relative to the common root), prefix the pattern with `/`.
+*   **Anchored Pattern:** To match only at the root of any of the provided directories, prefix the pattern with `/`.
     ```bash
     # Exclude the 'vendor' directory only at the top level, not 'app/vendor'
     fstate -e /vendor .
