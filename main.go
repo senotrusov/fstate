@@ -21,12 +21,13 @@ import (
 )
 
 const (
-	fstateFile       = ".fstate"
-	fstateBitrotFile = ".fstate-after-bitrot"
-	iso8601Format    = "2006-01-02T15:04:05.000Z"
-	gitDir           = ".git"
-	hashLength       = 16
-	hashBufferSize   = 128 * 1024 // 128 KiB buffer for hashing files
+	fstateFile          = ".fstate"
+	fstateBitrotFile    = ".fstate-after-bitrot"
+	iso8601FormatNano   = "2006-01-02T15:04:05.000000000Z" // For .fstate file storage and bitrot checks
+	iso8601FormatSecond = "2006-01-02T15:04:05Z"           // For user-facing output
+	gitDir              = ".git"
+	hashLength          = 16
+	hashBufferSize      = 128 * 1024 // 128 KiB buffer for hashing files
 )
 
 // stringSliceFlag is a custom flag type to handle multiple occurrences of a string flag.
@@ -675,7 +676,7 @@ func (b *Bucket) Process(cfg *Config) error {
 		})
 		var fstateContent strings.Builder
 		for _, f := range files {
-			fmt.Fprintf(&fstateContent, "%s %s %s\n", f.Hash, formatTimestamp(f.Timestamp), f.Path)
+			fmt.Fprintf(&fstateContent, "%s %s %s\n", f.Hash, formatTimestampNano(f.Timestamp), f.Path)
 		}
 		fstateString = fstateContent.String()
 		b.BucketHash = fmt.Sprintf("%016x", xxh3.HashString(fstateString))
@@ -745,7 +746,7 @@ func checkBitrot(fstatePath string, currentFiles []FileState) ([]string, error) 
 		if len(parts) != 3 {
 			continue
 		}
-		ts, err := time.Parse(iso8601Format, parts[1])
+		ts, err := time.Parse(iso8601FormatNano, parts[1])
 		if err != nil {
 			continue // Malformed line
 		}
@@ -755,12 +756,8 @@ func checkBitrot(fstatePath string, currentFiles []FileState) ([]string, error) 
 	var bitrottenFiles []string
 	for _, currentFile := range currentFiles {
 		if oldFile, ok := existingState[currentFile.Path]; ok {
-			// Truncate both timestamps to millisecond precision for a reliable comparison.
-			oldTs := oldFile.Timestamp.Truncate(time.Millisecond)
-			newTs := currentFile.Timestamp.Truncate(time.Millisecond)
-
-			// Bitrot condition: same mtime (at millisecond precision), different hash
-			if oldTs.Equal(newTs) && oldFile.Hash != currentFile.Hash {
+			// Bitrot condition: same timestamp (at nanosecond precision), different hash
+			if oldFile.Timestamp.Equal(currentFile.Timestamp) && oldFile.Hash != currentFile.Hash {
 				bitrottenFiles = append(bitrottenFiles, currentFile.Path)
 			}
 		}
@@ -1226,9 +1223,14 @@ func hashFileChunked(path string) (string, error) {
 	return hash, nil
 }
 
-// formatTimestamp converts a time.Time to the required ISO 8601 format.
+// formatTimestamp converts a time.Time to ISO 8601 format with second precision for program output.
 func formatTimestamp(t time.Time) string {
-	return t.UTC().Format(iso8601Format)
+	return t.UTC().Format(iso8601FormatSecond)
+}
+
+// formatTimestampNano converts a time.Time to the ISO 8601 format with nanosecond precision for state files.
+func formatTimestampNano(t time.Time) string {
+	return t.UTC().Format(iso8601FormatNano)
 }
 
 // isExcluded checks if a path should be excluded based on a list of patterns.
