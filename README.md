@@ -12,15 +12,6 @@ With this visibility, you can immediately determine which computer holds the mos
 
 All of this helps you manage your files across multiple machines without relying on automated n-way synchronization tools, which often come with their own set of problems.
 
-### 🚀 Features
-
-*   **Git Repository Analysis:** Summarizes the state of any Git repository in two concise lines, showing its status (clean, ahead, dirty, or error), commit or content hash, last modification time, and relative path on the first line, followed by branch relationships, ahead/behind counts, and the remote URL on the second.
-*   **Directory buckets:** For non-versioned folders, `fstate` uses a simple heuristic to group directories into meaningful “buckets,” working with or without user-provided hints. Each bucket is displayed as a single-line summary. Additionally, `fstate` may maintain a hidden **`.fstate`** file inside the bucket containing a manifest of file paths, hashes, and timestamps.
-*   **Nested Entity Exclusion:** Automatically excludes any subdirectory that is itself a Git repository or another `fstate` bucket from its parent's hash calculation, ensuring clean, modular state tracking.
-*   **Deterministic Hashing:** Uses `xxh3` for high-speed, non-cryptographic, 16-character hashes for both file contents and overall directory states.
-*   **Built-in Bitrot Detection:** Compares the current file mtime and hash against the existing `.fstate` file. If a file's mtime is the *same* but its hash is *different*, it indicates potential bitrot.
-*   **Common Root Relativity:** Automatically determines the longest common ancestor path for all input arguments, making output paths universally comparable across machines.
-
 ### ✨ Example output
 
 A clean repository with a **single commit ready to push**, a dirty repository with **uncommitted changes**, and a directory containing **photos**, all shown together in one output:
@@ -32,6 +23,15 @@ git ! 0f498c89b27a3c3d 2025-11-05T02:01:00.123Z project-c
       main https://github.com/user/project-c.git
 dir   060dd8f97cf4da23 2025-11-09T22:41:31.139Z photos
 ```
+
+### 🚀 Features
+
+*   **Git Repository Analysis:** Summarizes the state of any Git repository in two concise lines, showing its status (clean, ahead, dirty, or error), commit or content hash, last modification time, and relative path on the first line, followed by branch relationships, ahead/behind counts, and the remote URL on the second.
+*   **Directory buckets:** For non-versioned folders, `fstate` uses a simple heuristic to group directories into meaningful “buckets,” working with or without user-provided hints. Each bucket is displayed as a single-line summary. Additionally, `fstate` may maintain a hidden **`.fstate`** file inside the bucket containing a manifest of file paths, hashes, and timestamps.
+*   **Nested Entity Exclusion:** Automatically excludes any subdirectory that is itself a Git repository or another `fstate` bucket from its parent's hash calculation, ensuring clean, modular state tracking.
+*   **Deterministic Hashing:** Uses `xxh3` for high-speed, non-cryptographic, 16-character hashes for both file contents and overall directory states.
+*   **Built-in Bitrot Detection:** Compares the current file mtime and hash against the existing `.fstate` file. If a file's mtime is the *same* but its hash is *different*, it indicates potential bitrot.
+*   **Common Root Relativity:** Automatically determines the longest common ancestor path for all input arguments, making output paths universally comparable across machines.
 
 ---
 
