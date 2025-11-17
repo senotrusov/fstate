@@ -381,17 +381,34 @@ func findEntities(cfg *Config) ([]Entity, error) {
 				return nil
 			}
 
-			if d.IsDir() {
-				if hasDirEntry(currentPath, gitDir) {
-					gitRepos = append(gitRepos, currentPath)
-					return filepath.SkipDir // Git repos are terminal.
-				}
-				if hasDirEntry(currentPath, fstateFile) {
-					fstateBuckets = append(fstateBuckets, currentPath)
-				}
-			} else {
+			if !d.IsDir() {
+				// It's a file, record its parent directory.
 				dirsWithFiles[filepath.Dir(currentPath)] = true
+				return nil
 			}
+
+			// From here, we are processing a directory.
+
+			// Rule: Never descend into a .git directory itself.
+			if d.Name() == gitDir {
+				return filepath.SkipDir
+			}
+
+			// Rule: If a directory contains a .git SUB-directory, it's a Git repo.
+			// This check specifically looks for a directory to ignore .git files (submodules).
+			gitSubdirPath := filepath.Join(currentPath, gitDir)
+			info, statErr := os.Stat(gitSubdirPath)
+			if statErr == nil && info.IsDir() {
+				gitRepos = append(gitRepos, currentPath)
+				// We do NOT return filepath.SkipDir here, which allows the
+				// walker to descend into this Git repo to find nested repos.
+			}
+
+			// Rule: Check for .fstate file to identify a bucket.
+			if hasDirEntry(currentPath, fstateFile) {
+				fstateBuckets = append(fstateBuckets, currentPath)
+			}
+
 			return nil
 		})
 		if err != nil {
