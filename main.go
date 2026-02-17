@@ -902,7 +902,7 @@ func (g *GitRepo) Print(writer io.Writer, commonRoot string, cfg *Config) {
 		if g.Error != nil {
 			errorMsg = strings.ReplaceAll(g.Error.Error(), "\n", " ")
 		}
-		fmt.Fprintf(writer, "git %s %s %s %s\n      %s\n", g.Status, g.Hash, formatTimestamp(g.Timestamp), relPath, errorMsg)
+		fmt.Fprintf(writer, "git %s %s %s %s %s\n", g.Status, g.Hash, formatTimestamp(g.Timestamp), relPath, errorMsg)
 		return
 	}
 
@@ -945,7 +945,7 @@ func (g *GitRepo) Print(writer io.Writer, commonRoot string, cfg *Config) {
 	}
 
 	branchInfo := strings.Join(branchInfoParts, " ")
-	fmt.Fprintf(writer, "git %s %s %s %s\n      %s\n", g.Status, g.Hash, formatTimestamp(g.Timestamp), relPath, branchInfo)
+	fmt.Fprintf(writer, "git %s %s %s %s %s\n", g.Status, g.Hash, formatTimestamp(g.Timestamp), relPath, branchInfo)
 }
 
 // calculateDirtyState calculates a deterministic hash and finds the latest modification time for the
