@@ -1,4 +1,4 @@
-module fstate
+module github.com/senotrusov/fstate
 
 go 1.25.3
 

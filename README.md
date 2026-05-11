@@ -33,30 +33,29 @@ dir   060dd8f97cf4da23 2025-11-09T22:41:31.139Z photos
 *   **Built-in Bitrot Detection:** Compares the current file mtime and hash against the existing `.fstate` file. If a file's mtime is the *same* but its hash is *different*, it indicates potential bitrot.
 *   **Common Root Relativity:** Automatically determines the longest common ancestor path for all input arguments, making output paths universally comparable across machines.
 
----
-
 ### 📦 Installation
 
-Since `fstate` is written in Go, you can easily install it if you have the Go toolchain configured:
-
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/senotrusov/fstate.git
-    cd fstate
-    ```
-2.  **Install the binary:**
-    ```bash
-    go install
-    ```
-    *(The `fstate` binary will be placed in your `$GOPATH/bin` or `$GOBIN`)*
-
-### ⚙️ Building for Development
-
-To compile the executable in the current directory for local testing or development:
+If you have the Go toolchain installed, you can install `fstate` directly:
 
 ```bash
-go build
+go install github.com/senotrusov/fstate/cmd/fstate@latest
 ```
+*(The binary will be placed in your `$GOPATH/bin` or `$GOBIN`)*
+
+### 🛠️ Development
+
+If you want to contribute or build from source:
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/senotrusov/fstate.git
+   cd fstate
+   ```
+
+2. **Build locally:**
+   ```bash
+   go build ./cmd/fstate
+   ```
 
 ### 💡 Usage
 
